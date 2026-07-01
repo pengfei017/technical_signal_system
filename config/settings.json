@@ -1,0 +1,39 @@
+{
+  "output_root": "E:/technical_signals",
+  "schema": "tech_signal",
+  "timezone": "Asia/Shanghai",
+  "universe": {
+    "include_watchlist": true,
+    "watch_candidate_statuses": ["priority", "watching"],
+    "watch_candidate_ratings": ["A", "B"],
+    "include_all_a_data": true
+  },
+  "data": {
+    "all_a_lookback_trading_days": 90,
+    "daily_fetch_recent_trading_days": 5,
+    "focus_moneyflow_fetch_recent_trading_days": 5,
+    "request_sleep_seconds": 0.25,
+    "retry_count": 3,
+    "retry_sleep_seconds": 2.0,
+    "refresh_recent_trading_days": 5,
+    "moneyflow_scope": "focus"
+  },
+  "signals": {
+    "mode": "mixed",
+    "min_history_days": 60,
+    "moving_averages": [5, 10, 20, 60],
+    "rsi_period": 14,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    "overheat_bias5": 8.0,
+    "high_rsi": 80.0,
+    "heavy_volume_ratio": 1.5,
+    "shrink_volume_ratio": 0.7,
+    "breakout_volume_ratio": 1.3,
+    "pullback_volume_ratio": 0.9
+  },
+  "report": {
+    "top_n": 30
+  }
+}

@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+E:/technical_signals/
+outputs/
+logs/
+cache/
+*.lock
