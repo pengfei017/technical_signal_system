@@ -331,6 +331,15 @@ def compute_signals(settings: Settings, trade_date: str | None = None) -> dict[s
         "reason",
     ]
     with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {qname(settings, 'technical_signals')} WHERE trade_date=%s AND NOT (ts_code = ANY(%s))",
+                (trade_date, codes),
+            )
+            cur.execute(
+                f"DELETE FROM {qname(settings, 'latest_signals')} WHERE NOT (ts_code = ANY(%s))",
+                (codes,),
+            )
         signals = upsert_rows(
             conn,
             table=qname(settings, "technical_signals"),

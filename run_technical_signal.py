@@ -79,6 +79,9 @@ def release_lock(lock_path: Path) -> None:
 def update_data(settings, *, days: int | None = None, skip_moneyflow: bool = False) -> dict:
     fetcher = TushareFetcher(settings)
     data_cfg = settings.section("data")
+    calendar_start = str(data_cfg.get("trade_calendar_start_date", "2010-01-01"))
+    calendar_future_years = int(data_cfg.get("trade_calendar_future_years", 2))
+    calendar_end = f"{datetime.now().year + calendar_future_years}1231"
     history_days = int(data_cfg.get("all_a_lookback_trading_days", 90))
     fetch_recent_days = int(data_cfg.get("daily_fetch_recent_trading_days", data_cfg.get("refresh_recent_trading_days", 5)))
     existing_bar_dates = fetcher.existing_daily_bar_date_count()
@@ -89,7 +92,7 @@ def update_data(settings, *, days: int | None = None, skip_moneyflow: bool = Fal
     dates = fetcher.open_trade_dates(fetch_days + 1)
     if not dates:
         raise RuntimeError("No open trade dates found")
-    cal_count = fetcher.sync_trade_calendar(dates)
+    calendar_metrics = fetcher.sync_trade_calendar_range(calendar_start, calendar_end)
     market_metrics = fetcher.fetch_market_for_dates(dates)
     effective_trade_date = market_metrics.get("latest_trade_date") or dates[-1]
     members = load_focus_universe(settings)
@@ -110,7 +113,7 @@ def update_data(settings, *, days: int | None = None, skip_moneyflow: bool = Fal
         "fetch_window_trading_days": fetch_days,
         "existing_daily_bar_dates": existing_bar_dates,
         "bootstrap_backfill": bootstrap_backfill,
-        "calendar_rows": cal_count,
+        **calendar_metrics,
         "universe_rows": universe_count,
         "moneyflow_rows": moneyflow_count,
         **market_metrics,

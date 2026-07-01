@@ -98,10 +98,29 @@ class TushareFetcher:
         if not dates:
             return 0
         start, end = dates[0], dates[-1]
+        metrics = self.sync_trade_calendar_range(start, end)
+        return int(metrics["calendar_rows"])
+
+    def sync_trade_calendar_range(self, start_date: str, end_date: str) -> dict[str, int | str]:
+        start, end = _date_text(start_date), _date_text(end_date)
         df = self._call(
             "trade_cal_sync",
             lambda: self.pro.trade_cal(exchange="SSE", start_date=start, end_date=end),
         )
+        metrics: dict[str, int | str] = {
+            "calendar_rows": 0,
+            "calendar_open_rows": 0,
+            "calendar_start_date": _to_date(start) or "",
+            "calendar_end_date": _to_date(end) or "",
+            "calendar_actual_start_date": "",
+            "calendar_actual_end_date": "",
+        }
+        if df.empty:
+            return metrics
+        df = df.sort_values("cal_date")
+        metrics["calendar_actual_start_date"] = _to_date(df["cal_date"].iloc[0]) or ""
+        metrics["calendar_actual_end_date"] = _to_date(df["cal_date"].iloc[-1]) or ""
+        metrics["calendar_open_rows"] = int((df["is_open"].astype(str) == "1").sum())
         rows = []
         for _, row in df.iterrows():
             rows.append(
@@ -120,7 +139,8 @@ class TushareFetcher:
                 conflict_columns=["cal_date"],
             )
             conn.commit()
-        return count
+        metrics["calendar_rows"] = count
+        return metrics
 
     def fetch_market_for_dates(self, dates: list[str]) -> dict[str, int | str]:
         metrics: dict[str, int | str] = {
