@@ -46,8 +46,10 @@ python run_technical_signal.py update-indexes
 python run_technical_signal.py update-global-indexes
 python run_technical_signal.py backfill-daily --year 2010
 python run_technical_signal.py backfill-daily --start-date 2010-01-01 --end-date 2010-12-31
+python run_technical_signal.py backfill-trading-data --year 2026 --sleep-seconds 0.35
 python run_technical_signal.py backfill-market-layers --year 2026
 python run_technical_signal.py backfill-market-layers --year 2026 --force-signals
+python run_technical_signal.py backfill-signal-layers --year 2026
 python run_technical_signal.py validate-data
 python run_technical_signal.py refresh-dragon-leaders
 python run_technical_signal.py process
@@ -58,7 +60,7 @@ python run_technical_signal.py report
 python install_windows_task.py
 ```
 
-说明：日常自动化使用拆分任务；`run` 保留为手动全流程；`--days` 用于首轮初始化或需要补历史数据时手动扩大抓取窗口。`backfill-daily` 用于慢速回补历史日线、复权因子和 daily_basic，默认每次 Tushare 请求后等待 1.2 秒，失败后可重新运行续补。`backfill-market-layers` 用于按日期区间补 `index_daily`、`global_index_daily` 和 `dragon_leader_daily`；龙头候选只做技术层评分，若当天底层全 A 信号不存在会先生成 `stock_signal_daily` / `theme_signal_daily`，加 `--force-signals` 会强制重算这些底层信号。Tushare 单接口失败会短重试，抓取/晚间流水线整条失败会等待 20 分钟重试，最多再试 2 次。
+说明：日常自动化使用拆分任务；`run` 保留为手动全流程；`--days` 用于首轮初始化或需要补历史数据时手动扩大抓取窗口。`backfill-daily` 用于慢速回补历史日线、复权因子和 daily_basic，默认每次 Tushare 请求后等待 1.2 秒，失败后可重新运行续补。`backfill-trading-data` 用于按日期区间补全市场个股资金流、涨跌停/炸板、龙虎榜、市场/行业/概念资金流；默认跳过看起来已经完整的交易日，加 `--force` 可强制重抓。`backfill-market-layers` 用于按日期区间补 `index_daily`、`global_index_daily` 和 `dragon_leader_daily`；龙头候选只做技术层评分，若当天底层全 A 信号不存在会先生成 `stock_signal_daily` / `theme_signal_daily`，加 `--force-signals` 会强制重算这些底层信号。`backfill-signal-layers` 用于按日期区间补齐观察池技术信号、全 A 个股交易信号和主题热度；默认跳过完整日期，并只补缺的全 A 个股/主题层，加 `--force` 才会强制重算三层；该命令按日期升序执行，最后一个交易日会落到 `latest_signals`。Tushare 单接口失败会短重试，抓取/晚间流水线整条失败会等待 20 分钟重试，最多再试 2 次。
 
 定时任务：
 

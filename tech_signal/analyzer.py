@@ -155,11 +155,32 @@ def _score_row(row: pd.Series, cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _clean_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {key: _clean_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean_value(item) for item in value]
+    if value is pd.NA:
+        return None
+    try:
+        missing = pd.isna(value)
+    except (TypeError, ValueError):
+        return value
+    if isinstance(missing, bool) and missing:
+        return None
+    return value
+
+
 def _json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False)
+    return json.dumps(_clean_value(value), ensure_ascii=False, default=str, allow_nan=False)
 
 
-def compute_signals(settings: Settings, trade_date: str | None = None) -> dict[str, int | str]:
+def compute_signals(
+    settings: Settings,
+    trade_date: str | None = None,
+    *,
+    refresh_final_layers: bool = True,
+) -> dict[str, int | str]:
     with connect() as conn, conn.cursor() as cur:
         if trade_date is None:
             cur.execute(f"SELECT max(trade_date) AS d FROM {qname(settings, 'daily_bars')}")
@@ -265,6 +286,7 @@ def compute_signals(settings: Settings, trade_date: str | None = None) -> dict[s
             "reason": scored["reason"],
             "data_quality": _json(data_quality),
         }
+        base = {key: _clean_value(value) for key, value in base.items()}
         out_rows.append(base)
         latest_rows.append(
             {
@@ -358,5 +380,5 @@ def compute_signals(settings: Settings, trade_date: str | None = None) -> dict[s
             conflict_columns=["ts_code"],
         )
         conn.commit()
-    final_metrics = refresh_final_signal_layers(settings, trade_date)
+    final_metrics = refresh_final_signal_layers(settings, trade_date) if refresh_final_layers else {}
     return {"trade_date": trade_date, "signals": signals, "latest": latest, **final_metrics}

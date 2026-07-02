@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from typing import Any
 
 import pandas as pd
@@ -41,6 +42,10 @@ def _num(value: object) -> float | None:
 def _clean(value: object) -> object:
     if value is None:
         return None
+    if isinstance(value, dict):
+        return {str(k): _clean(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean(v) for v in value]
     try:
         if pd.isna(value):
             return None
@@ -48,14 +53,16 @@ def _clean(value: object) -> object:
         pass
     if hasattr(value, "item"):
         try:
-            return value.item()
+            return _clean(value.item())
         except Exception:
             return value
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     return value
 
 
 def _json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, default=str)
+    return json.dumps(_clean(value), ensure_ascii=False, default=str, allow_nan=False)
 
 
 def _yuan_to_yi(value: object) -> float | None:

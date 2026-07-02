@@ -25,7 +25,15 @@ from tech_signal.market_layers import (
     refresh_market_structure_layers,
 )
 from tech_signal.report import generate_report
-from tech_signal.trading_signals import update_trading_auxiliary
+from tech_signal.trading_signals import (
+    fetch_lhb,
+    fetch_limit_events,
+    fetch_moneyflow_layers,
+    refresh_stock_signal_daily,
+    refresh_theme_signal_daily,
+    sync_moneyflow_stock_from_daily,
+    update_trading_auxiliary,
+)
 from tech_signal.tushare_fetcher import TushareFetcher
 from tech_signal.universe import load_focus_universe, sync_signal_universe
 
@@ -363,32 +371,277 @@ def backfill_daily_history(
     }
 
 
-def update_trading_data(settings, *, skip_moneyflow: bool = False) -> dict[str, Any]:
+def update_trading_data(settings, *, trade_date: str | None = None, skip_moneyflow: bool = False) -> dict[str, Any]:
     fetcher = TushareFetcher(settings)
     data_cfg = settings.section("data")
-    latest_trade_date = _latest_daily_bar_trade_date(settings)
-    if not latest_trade_date:
+    target_trade_date = _compact_date(trade_date) if trade_date else _latest_daily_bar_trade_date(settings)
+    if not target_trade_date:
         raise RuntimeError("No daily_bars trade_date available; run update-market-data first")
 
     moneyflow_count = 0
     moneyflow_scope = str(data_cfg.get("moneyflow_scope", "all_market"))
     if not skip_moneyflow and moneyflow_scope == "all_market":
         mf_days = int(data_cfg.get("stock_moneyflow_fetch_recent_trading_days", data_cfg.get("focus_moneyflow_fetch_recent_trading_days", 5)))
-        moneyflow_dates = _open_trade_dates(settings, fetcher, lookback=mf_days, end_date=latest_trade_date)
+        moneyflow_dates = _open_trade_dates(settings, fetcher, lookback=mf_days, end_date=target_trade_date)
         moneyflow_count = fetcher.fetch_market_moneyflow(moneyflow_dates)
     elif not skip_moneyflow and moneyflow_scope == "focus":
         members = load_focus_universe(settings)
         mf_days = int(data_cfg.get("focus_moneyflow_fetch_recent_trading_days", data_cfg.get("focus_moneyflow_lookback_trading_days", 5)))
-        moneyflow_dates = _open_trade_dates(settings, fetcher, lookback=mf_days, end_date=latest_trade_date)
+        moneyflow_dates = _open_trade_dates(settings, fetcher, lookback=mf_days, end_date=target_trade_date)
         moneyflow_count = fetcher.fetch_focus_moneyflow([m.ts_code for m in members], moneyflow_dates)
 
-    auxiliary_metrics = update_trading_auxiliary(settings, fetcher, latest_trade_date)
+    auxiliary_metrics = update_trading_auxiliary(settings, fetcher, target_trade_date)
     return {
-        "trade_date": latest_trade_date,
+        "trade_date": _dash_date(target_trade_date),
         "moneyflow_scope": moneyflow_scope,
         "moneyflow_rows": moneyflow_count,
         **auxiliary_metrics,
     }
+
+
+def _trading_counts_for_date(settings, trade_date: str) -> dict[str, int]:
+    date_value = _dash_date(trade_date)
+    tables = [
+        "daily_bars",
+        "moneyflow_daily",
+        "moneyflow_stock",
+        "limit_events",
+        "limit_market_stats",
+        "lhb_stocks",
+        "lhb_seats",
+        "moneyflow_market",
+        "moneyflow_industry",
+        "moneyflow_concept",
+    ]
+    with connect() as conn, conn.cursor() as cur:
+        counts = {}
+        for table in tables:
+            counts[table] = _count_rows_for_date(cur, settings, table, str(date_value))
+    return counts
+
+
+def _trading_data_complete(counts: dict[str, int], validation_cfg: dict[str, Any]) -> bool:
+    min_moneyflow = int(validation_cfg.get("min_moneyflow_rows", 1000))
+    return (
+        counts.get("moneyflow_daily", 0) >= min_moneyflow
+        and counts.get("moneyflow_stock", 0) >= int(validation_cfg.get("min_moneyflow_stock_rows", min_moneyflow))
+        and counts.get("limit_events", 0) >= int(validation_cfg.get("min_limit_events", 1))
+        and counts.get("limit_market_stats", 0) >= int(validation_cfg.get("min_limit_market_stats_rows", 1))
+        and counts.get("lhb_stocks", 0) >= int(validation_cfg.get("min_lhb_stocks", 1))
+        and counts.get("moneyflow_market", 0) >= int(validation_cfg.get("min_moneyflow_market_rows", 1))
+        and counts.get("moneyflow_industry", 0) >= int(validation_cfg.get("min_moneyflow_industry_rows", 1))
+        and counts.get("moneyflow_concept", 0) >= int(validation_cfg.get("min_moneyflow_concept_rows", 1))
+    )
+
+
+def backfill_trading_data(
+    settings,
+    *,
+    start_date: str,
+    end_date: str,
+    force: bool = False,
+    sleep_seconds: float | None = None,
+) -> dict[str, Any]:
+    fetcher = TushareFetcher(settings)
+    if sleep_seconds is not None:
+        fetcher.sleep_seconds = float(sleep_seconds)
+    validation_cfg = settings.section("validation")
+    start_compact = _compact_date(start_date)
+    end_compact = _compact_date(end_date)
+    if not start_compact or not end_compact:
+        raise RuntimeError(f"Invalid backfill date range: {start_date} to {end_date}")
+    dates = _open_trade_dates_between(settings, start_date=start_compact, end_date=end_compact)
+    if not dates:
+        raise RuntimeError(f"No open trade dates found for {start_compact}-{end_compact}")
+
+    min_moneyflow = int(validation_cfg.get("min_moneyflow_rows", 1000))
+    min_moneyflow_stock = int(validation_cfg.get("min_moneyflow_stock_rows", min_moneyflow))
+    warnings: list[str] = []
+    totals: dict[str, Any] = {
+        "backfill_trading_start_date": _dash_date(start_compact),
+        "backfill_trading_end_date": _dash_date(end_compact),
+        "backfill_trading_target_dates": len(dates),
+        "backfill_trading_force": force,
+        "backfill_trading_sleep_seconds": fetcher.sleep_seconds,
+        "backfill_trading_skipped_complete_dates": 0,
+        "backfill_trading_completed_dates": 0,
+        "moneyflow_rows": 0,
+        "moneyflow_stock_rows": 0,
+        "limit_events": 0,
+        "lhb_rows": 0,
+        "lhb_seats": 0,
+        "moneyflow_market_rows": 0,
+        "moneyflow_industry_rows": 0,
+        "moneyflow_concept_rows": 0,
+    }
+
+    for index, trade_date in enumerate(dates, start=1):
+        counts = _trading_counts_for_date(settings, trade_date)
+        if not force and _trading_data_complete(counts, validation_cfg):
+            totals["backfill_trading_skipped_complete_dates"] += 1
+            totals["backfill_trading_completed_dates"] += 1
+            logging.info("trading backfill %s/%s %s skipped complete", index, len(dates), _dash_date(trade_date))
+            continue
+
+        logging.info("trading backfill %s/%s %s start counts=%s", index, len(dates), _dash_date(trade_date), counts)
+        if counts.get("daily_bars", 0) < int(validation_cfg.get("min_daily_bar_rows", 1000)):
+            warnings.append(f"{_dash_date(trade_date)} skipped: daily_bars rows {counts.get('daily_bars', 0)}")
+            continue
+
+        if force or counts.get("moneyflow_daily", 0) < min_moneyflow:
+            try:
+                rows = fetcher.fetch_market_moneyflow([trade_date])
+                totals["moneyflow_rows"] += rows
+            except Exception as exc:
+                warnings.append(f"{_dash_date(trade_date)} moneyflow_daily: {exc}")
+
+        counts = _trading_counts_for_date(settings, trade_date)
+        if force or counts.get("moneyflow_stock", 0) < min_moneyflow_stock:
+            try:
+                rows = sync_moneyflow_stock_from_daily(settings, trade_date)
+                totals["moneyflow_stock_rows"] += rows
+            except Exception as exc:
+                warnings.append(f"{_dash_date(trade_date)} moneyflow_stock: {exc}")
+
+        counts = _trading_counts_for_date(settings, trade_date)
+        if force or counts.get("limit_events", 0) < int(validation_cfg.get("min_limit_events", 1)) or counts.get("limit_market_stats", 0) < int(validation_cfg.get("min_limit_market_stats_rows", 1)):
+            try:
+                metrics = fetch_limit_events(settings, fetcher, trade_date)
+                totals["limit_events"] += int(metrics.get("limit_events", 0) or 0)
+                warnings.extend(str(x) for x in metrics.get("limit_warnings", []) if x)
+            except Exception as exc:
+                warnings.append(f"{_dash_date(trade_date)} limit_events: {exc}")
+
+        counts = _trading_counts_for_date(settings, trade_date)
+        if force or counts.get("lhb_stocks", 0) < int(validation_cfg.get("min_lhb_stocks", 1)):
+            try:
+                metrics = fetch_lhb(settings, fetcher, trade_date)
+                totals["lhb_rows"] += int(metrics.get("lhb_rows", 0) or 0)
+                totals["lhb_seats"] += int(metrics.get("lhb_seats", 0) or 0)
+                warnings.extend(str(x) for x in metrics.get("lhb_warnings", []) if x)
+            except Exception as exc:
+                warnings.append(f"{_dash_date(trade_date)} lhb: {exc}")
+
+        counts = _trading_counts_for_date(settings, trade_date)
+        if (
+            force
+            or counts.get("moneyflow_market", 0) < int(validation_cfg.get("min_moneyflow_market_rows", 1))
+            or counts.get("moneyflow_industry", 0) < int(validation_cfg.get("min_moneyflow_industry_rows", 1))
+            or counts.get("moneyflow_concept", 0) < int(validation_cfg.get("min_moneyflow_concept_rows", 1))
+        ):
+            try:
+                metrics = fetch_moneyflow_layers(settings, fetcher, trade_date)
+                totals["moneyflow_market_rows"] += int(metrics.get("moneyflow_market_rows", 0) or 0)
+                totals["moneyflow_industry_rows"] += int(metrics.get("moneyflow_industry_rows", 0) or 0)
+                totals["moneyflow_concept_rows"] += int(metrics.get("moneyflow_concept_rows", 0) or 0)
+                warnings.extend(str(x) for x in metrics.get("moneyflow_layer_warnings", []) if x)
+            except Exception as exc:
+                warnings.append(f"{_dash_date(trade_date)} moneyflow_layers: {exc}")
+
+        final_counts = _trading_counts_for_date(settings, trade_date)
+        if _trading_data_complete(final_counts, validation_cfg):
+            totals["backfill_trading_completed_dates"] += 1
+        logging.info("trading backfill %s/%s %s done counts=%s", index, len(dates), _dash_date(trade_date), final_counts)
+
+    totals["backfill_trading_warning_count"] = len(warnings)
+    totals["backfill_trading_warning_samples"] = warnings[:20]
+    return totals
+
+
+def _signal_layer_counts_for_date(settings, trade_date: str) -> dict[str, int]:
+    date_value = _dash_date(trade_date)
+    tables = ["technical_signals", "stock_signal_daily", "theme_signal_daily"]
+    with connect() as conn, conn.cursor() as cur:
+        return {table: _count_rows_for_date(cur, settings, table, str(date_value)) for table in tables}
+
+
+def _signal_layers_complete(counts: dict[str, int], validation_cfg: dict[str, Any]) -> bool:
+    min_technical = int(validation_cfg.get("min_technical_signal_rows", 1))
+    return (
+        counts.get("technical_signals", 0) >= min_technical
+        and _final_signal_layers_complete(counts, validation_cfg)
+    )
+
+
+def _final_signal_layers_complete(counts: dict[str, int], validation_cfg: dict[str, Any]) -> bool:
+    min_daily = int(validation_cfg.get("min_daily_bar_rows", 1000))
+    return (
+        counts.get("stock_signal_daily", 0) >= min_daily
+        and counts.get("theme_signal_daily", 0) >= int(validation_cfg.get("min_theme_signal_rows", 1))
+    )
+
+
+def backfill_signal_layers(
+    settings,
+    *,
+    start_date: str,
+    end_date: str,
+    force: bool = False,
+) -> dict[str, Any]:
+    start_compact = _compact_date(start_date)
+    end_compact = _compact_date(end_date)
+    if not start_compact or not end_compact:
+        raise RuntimeError(f"Invalid signal-layer backfill date range: {start_date} to {end_date}")
+    dates = _open_trade_dates_between(settings, start_date=start_compact, end_date=end_compact)
+    if not dates:
+        raise RuntimeError(f"No open trade dates found for {start_compact}-{end_compact}")
+
+    validation_cfg = settings.section("validation")
+    members = load_focus_universe(settings)
+    universe_count = sync_signal_universe(settings, members)
+    warnings: list[str] = []
+    totals: dict[str, Any] = {
+        "signal_layer_backfill_start_date": _dash_date(start_compact),
+        "signal_layer_backfill_end_date": _dash_date(end_compact),
+        "signal_layer_target_dates": len(dates),
+        "signal_layer_force": force,
+        "signal_layer_universe_rows": universe_count,
+        "signal_layer_skipped_complete_dates": 0,
+        "signal_layer_refreshed_dates": 0,
+        "technical_signals_rows": 0,
+        "latest_signals_rows": 0,
+        "stock_signal_daily_rows": 0,
+        "theme_signal_daily_rows": 0,
+    }
+
+    for index, trade_date in enumerate(dates, start=1):
+        counts = _signal_layer_counts_for_date(settings, trade_date)
+        if not force and _signal_layers_complete(counts, validation_cfg):
+            totals["signal_layer_skipped_complete_dates"] += 1
+            logging.info("signal-layer backfill %s/%s %s skipped complete", index, len(dates), _dash_date(trade_date))
+            continue
+
+        try:
+            logging.info("signal-layer backfill %s/%s %s start counts=%s", index, len(dates), _dash_date(trade_date), counts)
+            metrics = compute_signals(
+                settings,
+                trade_date=str(_dash_date(trade_date)),
+                refresh_final_layers=False,
+            )
+            stock_metrics: dict[str, Any] = {}
+            theme_metrics: dict[str, Any] = {}
+            if force or counts.get("stock_signal_daily", 0) < int(validation_cfg.get("min_daily_bar_rows", 1000)):
+                stock_metrics = refresh_stock_signal_daily(settings, trade_date)
+            if (
+                force
+                or stock_metrics
+                or counts.get("theme_signal_daily", 0) < int(validation_cfg.get("min_theme_signal_rows", 1))
+            ):
+                theme_metrics = refresh_theme_signal_daily(settings, trade_date)
+            metrics = {**metrics, **stock_metrics, **theme_metrics}
+            totals["signal_layer_refreshed_dates"] += 1
+            totals["technical_signals_rows"] += int(metrics.get("signals", 0) or 0)
+            totals["latest_signals_rows"] = int(metrics.get("latest", 0) or totals["latest_signals_rows"])
+            totals["stock_signal_daily_rows"] += int(metrics.get("stock_signal_daily_rows", 0) or 0)
+            totals["theme_signal_daily_rows"] += int(metrics.get("theme_signal_daily_rows", 0) or 0)
+            logging.info("signal-layer backfill %s/%s %s done metrics=%s", index, len(dates), _dash_date(trade_date), metrics)
+        except Exception as exc:
+            warnings.append(f"{_dash_date(trade_date)}: {type(exc).__name__}: {exc}")
+            logging.exception("signal-layer backfill failed for %s", _dash_date(trade_date))
+
+    totals["signal_layer_warning_count"] = len(warnings)
+    totals["signal_layer_warning_samples"] = warnings[:20]
+    return totals
 
 
 def update_data(settings, *, days: int | None = None, skip_moneyflow: bool = False) -> dict[str, Any]:
@@ -458,7 +711,9 @@ RETRYABLE_COMMANDS = {
     "update-indexes",
     "update-global-indexes",
     "backfill-daily",
+    "backfill-trading-data",
     "backfill-market-layers",
+    "backfill-signal-layers",
     "refresh-dragon-leaders",
     "evening-pipeline",
     "run",
@@ -471,7 +726,7 @@ def execute_command(settings, args) -> dict[str, Any]:
     if args.command == "update-market-data":
         return update_market_data(settings, days=args.days)
     if args.command == "update-trading-data":
-        return update_trading_data(settings, skip_moneyflow=args.skip_moneyflow)
+        return update_trading_data(settings, trade_date=args.trade_date, skip_moneyflow=args.skip_moneyflow)
     if args.command == "update-data":
         return update_data(settings, days=args.days, skip_moneyflow=args.skip_moneyflow)
     if args.command == "update-indexes":
@@ -491,6 +746,27 @@ def execute_command(settings, args) -> dict[str, Any]:
             settings,
             start_date=start_date,
             end_date=end_date,
+            sleep_seconds=args.sleep_seconds,
+        )
+    if args.command == "backfill-trading-data":
+        if args.year:
+            start_date = args.start_date or f"{args.year}0101"
+            if args.end_date:
+                end_date = args.end_date
+            elif args.year >= datetime.now().year:
+                end_date = _expected_latest_open_date(settings) or _latest_daily_bar_trade_date(settings)
+            else:
+                end_date = f"{args.year}1231"
+        else:
+            start_date = args.start_date
+            end_date = args.end_date or _expected_latest_open_date(settings) or _latest_daily_bar_trade_date(settings)
+        if not start_date or not end_date:
+            raise RuntimeError("backfill-trading-data requires --year or both --start-date and --end-date")
+        return backfill_trading_data(
+            settings,
+            start_date=start_date,
+            end_date=end_date,
+            force=args.force,
             sleep_seconds=args.sleep_seconds,
         )
     if args.command == "backfill-market-layers":
@@ -513,6 +789,26 @@ def execute_command(settings, args) -> dict[str, Any]:
             end_date=end_date,
             include_dragon_leaders=not args.skip_dragon_leaders,
             force_dragon_signals=args.force_signals,
+        )
+    if args.command == "backfill-signal-layers":
+        if args.year:
+            start_date = args.start_date or f"{args.year}0101"
+            if args.end_date:
+                end_date = args.end_date
+            elif args.year >= datetime.now().year:
+                end_date = _expected_latest_open_date(settings) or _latest_daily_bar_trade_date(settings)
+            else:
+                end_date = f"{args.year}1231"
+        else:
+            start_date = args.start_date or f"{datetime.now().year}0101"
+            end_date = args.end_date or _expected_latest_open_date(settings) or _latest_daily_bar_trade_date(settings)
+        if not start_date or not end_date:
+            raise RuntimeError("backfill-signal-layers requires a valid date range")
+        return backfill_signal_layers(
+            settings,
+            start_date=start_date,
+            end_date=end_date,
+            force=args.force,
         )
     if args.command == "validate-data":
         return validate_data_ready(
@@ -582,7 +878,9 @@ def main() -> int:
             "update-indexes",
             "update-global-indexes",
             "backfill-daily",
+            "backfill-trading-data",
             "backfill-market-layers",
+            "backfill-signal-layers",
             "validate-data",
             "analyze",
             "report",
@@ -602,6 +900,7 @@ def main() -> int:
     parser.add_argument("--date", default=None, help="Alias of --trade-date; use 最近交易日 or latest for default latest")
     parser.add_argument("--skip-moneyflow", action="store_true")
     parser.add_argument("--skip-dragon-leaders", action="store_true")
+    parser.add_argument("--force", action="store_true", help="Refresh backfill data even when the date already looks complete")
     parser.add_argument("--force-signals", action="store_true", help="Regenerate stock/theme signal layers during market-layer backfill")
     args = parser.parse_args()
     if args.date and not args.trade_date:
