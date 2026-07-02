@@ -11,12 +11,13 @@ import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from tech_signal.analyzer import compute_signals
 from tech_signal.config import load_settings
 from tech_signal.db import connect, init_schema, qname
 from tech_signal.report import generate_report
-from tech_signal.trading_signals import refresh_final_signal_layers, update_trading_auxiliary
+from tech_signal.trading_signals import update_trading_auxiliary
 from tech_signal.tushare_fetcher import TushareFetcher
 from tech_signal.universe import load_focus_universe, sync_signal_universe
 
@@ -77,12 +78,63 @@ def release_lock(lock_path: Path) -> None:
         pass
 
 
-def update_data(settings, *, days: int | None = None, skip_moneyflow: bool = False) -> dict:
+def update_calendar(settings) -> dict[str, Any]:
     fetcher = TushareFetcher(settings)
     data_cfg = settings.section("data")
     calendar_start = str(data_cfg.get("trade_calendar_start_date", "2010-01-01"))
     calendar_future_years = int(data_cfg.get("trade_calendar_future_years", 2))
     calendar_end = f"{datetime.now().year + calendar_future_years}1231"
+    return fetcher.sync_trade_calendar_range(calendar_start, calendar_end)
+
+
+def _recent_open_dates_from_db(settings, *, lookback: int, end_date: str | None = None) -> list[str]:
+    if end_date:
+        text = str(end_date).replace("-", "")[:8]
+        end_value = f"{text[:4]}-{text[4:6]}-{text[6:8]}" if len(text) == 8 else datetime.now().strftime("%Y-%m-%d")
+    else:
+        end_value = datetime.now().strftime("%Y-%m-%d")
+
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT cal_date
+            FROM {qname(settings, 'trade_calendar')}
+            WHERE is_open=true AND cal_date <= %s
+            ORDER BY cal_date DESC
+            LIMIT %s
+            """,
+            (end_value, lookback),
+        )
+        rows = [row["cal_date"].strftime("%Y%m%d") for row in cur.fetchall()]
+    return list(reversed(rows))
+
+
+def _open_trade_dates(settings, fetcher: TushareFetcher, *, lookback: int, end_date: str | None = None) -> list[str]:
+    dates = _recent_open_dates_from_db(settings, lookback=lookback, end_date=end_date)
+    if len(dates) >= min(lookback, 3):
+        return dates
+    return fetcher.open_trade_dates(lookback)
+
+
+def _latest_daily_bar_trade_date(settings) -> str:
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT max(trade_date) AS d FROM {qname(settings, 'daily_bars')}")
+        row = cur.fetchone()
+        return row["d"].strftime("%Y%m%d") if row and row["d"] else ""
+
+
+def _dash_date(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = str(value).replace("-", "")[:8]
+    if len(text) == 8:
+        return f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+    return value
+
+
+def update_market_data(settings, *, days: int | None = None) -> dict[str, Any]:
+    fetcher = TushareFetcher(settings)
+    data_cfg = settings.section("data")
     history_days = int(data_cfg.get("all_a_lookback_trading_days", 90))
     fetch_recent_days = int(data_cfg.get("daily_fetch_recent_trading_days", data_cfg.get("refresh_recent_trading_days", 5)))
     existing_bar_dates = fetcher.existing_daily_bar_date_count()
@@ -90,67 +142,104 @@ def update_data(settings, *, days: int | None = None, skip_moneyflow: bool = Fal
     fetch_days = int(days or history_days) if bootstrap_backfill else fetch_recent_days
     # Add one open-day buffer so a current intraday date with no settled daily data
     # does not crowd out the latest completed trading day.
-    dates = fetcher.open_trade_dates(fetch_days + 1)
+    dates = _open_trade_dates(settings, fetcher, lookback=fetch_days + 1)
     if not dates:
         raise RuntimeError("No open trade dates found")
-    calendar_metrics = fetcher.sync_trade_calendar_range(calendar_start, calendar_end)
+
     market_metrics = fetcher.fetch_market_for_dates(dates)
     effective_trade_date = market_metrics.get("latest_trade_date") or dates[-1]
     members = load_focus_universe(settings)
     universe_count = sync_signal_universe(settings, members)
-    moneyflow_count = 0
-    moneyflow_scope = str(data_cfg.get("moneyflow_scope", "all_market"))
-    if not skip_moneyflow and moneyflow_scope == "all_market":
-        mf_days = int(
-            data_cfg.get(
-                "stock_moneyflow_fetch_recent_trading_days",
-                data_cfg.get("focus_moneyflow_fetch_recent_trading_days", fetch_recent_days),
-            )
-        )
-        moneyflow_dates = dates[-mf_days:]
-        moneyflow_count = fetcher.fetch_market_moneyflow(moneyflow_dates)
-    elif not skip_moneyflow and moneyflow_scope == "focus":
-        mf_days = int(
-            data_cfg.get(
-                "focus_moneyflow_fetch_recent_trading_days",
-                data_cfg.get("focus_moneyflow_lookback_trading_days", fetch_recent_days),
-            )
-        )
-        moneyflow_dates = dates[-mf_days:]
-        moneyflow_count = fetcher.fetch_focus_moneyflow([m.ts_code for m in members], moneyflow_dates)
-    auxiliary_metrics = update_trading_auxiliary(settings, fetcher, str(effective_trade_date))
     return {
         "trade_date": effective_trade_date,
         "target_lookback_trading_days": history_days,
         "fetch_window_trading_days": fetch_days,
         "existing_daily_bar_dates": existing_bar_dates,
         "bootstrap_backfill": bootstrap_backfill,
-        "moneyflow_scope": moneyflow_scope,
-        **calendar_metrics,
         "universe_rows": universe_count,
-        "moneyflow_rows": moneyflow_count,
-        **auxiliary_metrics,
         **market_metrics,
     }
 
 
-def run_all(settings, args) -> dict:
-    init_schema(settings)
-    data_metrics = update_data(settings, days=args.days, skip_moneyflow=args.skip_moneyflow)
-    signal_metrics = compute_signals(settings, trade_date=None)
-    final_signal_metrics = refresh_final_signal_layers(settings, trade_date=str(signal_metrics["trade_date"]))
-    report_path = generate_report(settings, trade_date=str(signal_metrics["trade_date"]))
+def update_trading_data(settings, *, skip_moneyflow: bool = False) -> dict[str, Any]:
+    fetcher = TushareFetcher(settings)
+    data_cfg = settings.section("data")
+    latest_trade_date = _latest_daily_bar_trade_date(settings)
+    if not latest_trade_date:
+        raise RuntimeError("No daily_bars trade_date available; run update-market-data first")
+
+    moneyflow_count = 0
+    moneyflow_scope = str(data_cfg.get("moneyflow_scope", "all_market"))
+    if not skip_moneyflow and moneyflow_scope == "all_market":
+        mf_days = int(data_cfg.get("stock_moneyflow_fetch_recent_trading_days", data_cfg.get("focus_moneyflow_fetch_recent_trading_days", 5)))
+        moneyflow_dates = _open_trade_dates(settings, fetcher, lookback=mf_days, end_date=latest_trade_date)
+        moneyflow_count = fetcher.fetch_market_moneyflow(moneyflow_dates)
+    elif not skip_moneyflow and moneyflow_scope == "focus":
+        members = load_focus_universe(settings)
+        mf_days = int(data_cfg.get("focus_moneyflow_fetch_recent_trading_days", data_cfg.get("focus_moneyflow_lookback_trading_days", 5)))
+        moneyflow_dates = _open_trade_dates(settings, fetcher, lookback=mf_days, end_date=latest_trade_date)
+        moneyflow_count = fetcher.fetch_focus_moneyflow([m.ts_code for m in members], moneyflow_dates)
+
+    auxiliary_metrics = update_trading_auxiliary(settings, fetcher, latest_trade_date)
     return {
-        **data_metrics,
-        **signal_metrics,
-        **final_signal_metrics,
-        "report_file": str(report_path),
+        "trade_date": latest_trade_date,
+        "moneyflow_scope": moneyflow_scope,
+        "moneyflow_rows": moneyflow_count,
+        **auxiliary_metrics,
+    }
+
+
+def update_data(settings, *, days: int | None = None, skip_moneyflow: bool = False) -> dict[str, Any]:
+    market_metrics = update_market_data(settings, days=days)
+    trading_metrics = update_trading_data(settings, skip_moneyflow=skip_moneyflow)
+    return {**market_metrics, **trading_metrics}
+
+
+def process_signals(settings, *, trade_date: str | None = None) -> dict[str, Any]:
+    members = load_focus_universe(settings)
+    sync_signal_universe(settings, members)
+    signal_metrics = compute_signals(settings, trade_date=_dash_date(trade_date))
+    report_path = generate_report(settings, trade_date=str(signal_metrics["trade_date"]))
+    return {**signal_metrics, "report_file": str(report_path)}
+
+
+def evening_pipeline(settings, *, skip_moneyflow: bool = False) -> dict[str, Any]:
+    trading_metrics = update_trading_data(settings, skip_moneyflow=skip_moneyflow)
+    process_metrics = process_signals(settings, trade_date=str(trading_metrics["trade_date"]))
+    return {**trading_metrics, **process_metrics}
+
+
+def run_all(settings, args) -> dict[str, Any]:
+    init_schema(settings)
+    calendar_metrics = update_calendar(settings)
+    market_metrics = update_market_data(settings, days=args.days)
+    trading_metrics = update_trading_data(settings, skip_moneyflow=args.skip_moneyflow)
+    process_metrics = process_signals(settings)
+    return {
+        **calendar_metrics,
+        **market_metrics,
+        **trading_metrics,
+        **process_metrics,
     }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Independent A-share technical signal system")
-    parser.add_argument("command", choices=["init-db", "update-data", "analyze", "report", "run"])
+    parser.add_argument(
+        "command",
+        choices=[
+            "init-db",
+            "update-calendar",
+            "update-market-data",
+            "update-trading-data",
+            "update-data",
+            "analyze",
+            "report",
+            "process",
+            "evening-pipeline",
+            "run",
+        ],
+    )
     parser.add_argument("--config", default=None)
     parser.add_argument("--days", type=int, default=None, help="Backfill trading days for all-A daily data")
     parser.add_argument("--trade-date", default=None, help="YYYY-MM-DD, default latest")
@@ -175,16 +264,25 @@ def main() -> int:
             raise RuntimeError(f"Another technical_signal task is running: {lock_path}")
         init_schema(settings)
         run_id = start_run(settings, args.command)
-        if args.command == "update-data":
+        if args.command == "update-calendar":
+            metrics = update_calendar(settings)
+        elif args.command == "update-market-data":
+            metrics = update_market_data(settings, days=args.days)
+        elif args.command == "update-trading-data":
+            metrics = update_trading_data(settings, skip_moneyflow=args.skip_moneyflow)
+        elif args.command == "update-data":
             metrics = update_data(settings, days=args.days, skip_moneyflow=args.skip_moneyflow)
         elif args.command == "analyze":
             members = load_focus_universe(settings)
             sync_signal_universe(settings, members)
             metrics = compute_signals(settings, trade_date=args.trade_date)
-            metrics.update(refresh_final_signal_layers(settings, trade_date=str(metrics["trade_date"])))
         elif args.command == "report":
             path = generate_report(settings, trade_date=args.trade_date)
             metrics = {"report_file": str(path)}
+        elif args.command == "process":
+            metrics = process_signals(settings, trade_date=args.trade_date)
+        elif args.command == "evening-pipeline":
+            metrics = evening_pipeline(settings, skip_moneyflow=args.skip_moneyflow)
         else:
             metrics = run_all(settings, args)
         finish_run(settings, run_id, "finished", metrics=metrics)

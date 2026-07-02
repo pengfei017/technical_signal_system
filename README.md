@@ -37,13 +37,26 @@
 ```powershell
 cd D:\technical_signal_system
 python run_technical_signal.py init-db
+python run_technical_signal.py update-calendar
+python run_technical_signal.py update-market-data
+python run_technical_signal.py update-trading-data
+python run_technical_signal.py process
+python run_technical_signal.py evening-pipeline
 python run_technical_signal.py run
 python run_technical_signal.py run --days 90
 python run_technical_signal.py report
 python install_windows_task.py
 ```
 
-说明：日常运行使用 `python run_technical_signal.py run`；`--days` 用于首轮初始化或需要补历史数据时手动扩大抓取窗口。
+说明：日常自动化使用拆分任务；`run` 保留为手动全流程；`--days` 用于首轮初始化或需要补历史数据时手动扩大抓取窗口。
+
+定时任务：
+
+```text
+TechnicalSignalCalendarMonthly      每月 1 日 08:45，更新交易日历。
+TechnicalSignalMarketDataDaily      每天 17:20，更新全 A 日线、复权因子和 daily_basic。
+TechnicalSignalEveningPipelineDaily 每天 20:20，先更新全市场个股资金流、涨跌停/炸板、龙虎榜、行业/概念资金流，再串流执行分析和报告。
+```
 
 输出：
 
