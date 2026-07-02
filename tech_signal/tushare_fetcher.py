@@ -142,7 +142,7 @@ class TushareFetcher:
         metrics["calendar_rows"] = count
         return metrics
 
-    def fetch_market_for_dates(self, dates: list[str]) -> dict[str, int | str]:
+    def fetch_market_for_dates(self, dates: list[str], *, refresh_adjusted_scope: str = "all") -> dict[str, int | str]:
         metrics: dict[str, int | str] = {
             "daily_bars": 0,
             "daily_basic": 0,
@@ -174,7 +174,10 @@ class TushareFetcher:
             else:
                 metrics["empty_dates"] += 1
             LOGGER.info("date %s saved bars=%s basic=%s", trade_date, bars_count, basic_count)
-        metrics["adjusted_price_rows"] = self.refresh_adjusted_prices()
+        if refresh_adjusted_scope == "range":
+            metrics["adjusted_price_rows"] = self.refresh_adjusted_prices(dates)
+        else:
+            metrics["adjusted_price_rows"] = self.refresh_adjusted_prices()
         return metrics
 
     def _write_daily_bars(self, daily: pd.DataFrame, adj: pd.DataFrame) -> int:

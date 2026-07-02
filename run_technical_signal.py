@@ -146,6 +146,33 @@ def _dash_date(value: str | None) -> str | None:
     return value
 
 
+def _compact_date(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = str(value).replace("-", "")[:8]
+    return text if len(text) == 8 else None
+
+
+def _open_trade_dates_between(settings, *, start_date: str, end_date: str) -> list[str]:
+    start_value = _dash_date(start_date)
+    end_value = _dash_date(end_date)
+    if not start_value or not end_value:
+        raise RuntimeError(f"Invalid backfill date range: {start_date} to {end_date}")
+
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT cal_date
+            FROM {qname(settings, 'trade_calendar')}
+            WHERE is_open=true
+              AND cal_date BETWEEN %s AND %s
+            ORDER BY cal_date
+            """,
+            (start_value, end_value),
+        )
+        return [row["cal_date"].strftime("%Y%m%d") for row in cur.fetchall()]
+
+
 def _count_rows_for_date(cur, settings, table: str, trade_date: str, extra_where: str = "") -> int:
     cur.execute(
         f"SELECT count(*) AS n FROM {qname(settings, table)} WHERE trade_date=%s {extra_where}",
@@ -289,6 +316,44 @@ def update_market_data(settings, *, days: int | None = None) -> dict[str, Any]:
     }
 
 
+def backfill_daily_history(
+    settings,
+    *,
+    start_date: str,
+    end_date: str,
+    sleep_seconds: float | None = None,
+) -> dict[str, Any]:
+    fetcher = TushareFetcher(settings)
+    start_compact = _compact_date(start_date)
+    end_compact = _compact_date(end_date)
+    if not start_compact or not end_compact:
+        raise RuntimeError(f"Invalid backfill date range: {start_date} to {end_date}")
+    if start_compact > end_compact:
+        raise RuntimeError(f"Invalid backfill date range: {start_date} > {end_date}")
+
+    data_cfg = settings.section("data")
+    if sleep_seconds is None:
+        sleep_seconds = float(data_cfg.get("historical_daily_backfill_sleep_seconds", 1.2))
+    fetcher.sleep_seconds = float(sleep_seconds)
+
+    dates = _open_trade_dates_between(settings, start_date=start_compact, end_date=end_compact)
+    if not dates:
+        fetcher.sync_trade_calendar_range(start_compact, end_compact)
+        dates = _open_trade_dates_between(settings, start_date=start_compact, end_date=end_compact)
+    if not dates:
+        raise RuntimeError(f"No open trade dates found for {start_compact}-{end_compact}")
+
+    metrics = fetcher.fetch_market_for_dates(dates, refresh_adjusted_scope="range")
+    return {
+        "backfill_start_date": _dash_date(start_compact),
+        "backfill_end_date": _dash_date(end_compact),
+        "backfill_open_dates": len(dates),
+        "backfill_sleep_seconds": fetcher.sleep_seconds,
+        "trade_date": _dash_date(metrics.get("latest_trade_date") or dates[-1]),
+        **metrics,
+    }
+
+
 def update_trading_data(settings, *, skip_moneyflow: bool = False) -> dict[str, Any]:
     fetcher = TushareFetcher(settings)
     data_cfg = settings.section("data")
@@ -380,6 +445,7 @@ RETRYABLE_COMMANDS = {
     "update-market-data",
     "update-trading-data",
     "update-data",
+    "backfill-daily",
     "evening-pipeline",
     "run",
 }
@@ -394,6 +460,21 @@ def execute_command(settings, args) -> dict[str, Any]:
         return update_trading_data(settings, skip_moneyflow=args.skip_moneyflow)
     if args.command == "update-data":
         return update_data(settings, days=args.days, skip_moneyflow=args.skip_moneyflow)
+    if args.command == "backfill-daily":
+        if args.year:
+            start_date = f"{args.year}0101"
+            end_date = f"{args.year}1231"
+        else:
+            start_date = args.start_date
+            end_date = args.end_date
+        if not start_date or not end_date:
+            raise RuntimeError("backfill-daily requires --year or both --start-date and --end-date")
+        return backfill_daily_history(
+            settings,
+            start_date=start_date,
+            end_date=end_date,
+            sleep_seconds=args.sleep_seconds,
+        )
     if args.command == "validate-data":
         return validate_data_ready(
             settings,
@@ -455,6 +536,7 @@ def main() -> int:
             "update-market-data",
             "update-trading-data",
             "update-data",
+            "backfill-daily",
             "validate-data",
             "analyze",
             "report",
@@ -465,6 +547,10 @@ def main() -> int:
     )
     parser.add_argument("--config", default=None)
     parser.add_argument("--days", type=int, default=None, help="Backfill trading days for all-A daily data")
+    parser.add_argument("--year", type=int, default=None, help="Year for historical daily backfill, for example 2010")
+    parser.add_argument("--start-date", default=None, help="YYYY-MM-DD for historical daily backfill")
+    parser.add_argument("--end-date", default=None, help="YYYY-MM-DD for historical daily backfill")
+    parser.add_argument("--sleep-seconds", type=float, default=None, help="Override per-request sleep for historical backfill")
     parser.add_argument("--trade-date", default=None, help="YYYY-MM-DD, default latest")
     parser.add_argument("--skip-moneyflow", action="store_true")
     args = parser.parse_args()

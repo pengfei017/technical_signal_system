@@ -16,6 +16,7 @@
     "focus_moneyflow_fetch_recent_trading_days": 5,
     "stock_moneyflow_fetch_recent_trading_days": 5,
     "request_sleep_seconds": 0.25,
+    "historical_daily_backfill_sleep_seconds": 1.2,
     "retry_count": 3,
     "retry_sleep_seconds": 2.0,
     "refresh_recent_trading_days": 5,
