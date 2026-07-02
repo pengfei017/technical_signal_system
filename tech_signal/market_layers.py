@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -9,6 +10,9 @@ import pandas as pd
 from .config import Settings
 from .db import connect, qname, upsert_rows
 from .tushare_fetcher import TushareFetcher
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 DEFAULT_A_SHARE_INDEXES = {
@@ -95,6 +99,55 @@ def _latest_open_trade_date(settings: Settings) -> str:
 def _start_date(end_date: str, days: int) -> str:
     end_dt = datetime.strptime(_date_text(end_date), "%Y%m%d")
     return (end_dt - timedelta(days=days)).strftime("%Y%m%d")
+
+
+def _open_trade_dates_between(settings: Settings, start_date: str, end_date: str) -> list[str]:
+    start_value = _to_date(start_date)
+    end_value = _to_date(end_date)
+    if not start_value or not end_value:
+        raise RuntimeError(f"Invalid trade date range: {start_date} to {end_date}")
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT cal_date
+            FROM {qname(settings, 'trade_calendar')}
+            WHERE is_open=true
+              AND cal_date BETWEEN %s AND %s
+            ORDER BY cal_date
+            """,
+            (start_value, end_value),
+        )
+        return [row["cal_date"].strftime("%Y%m%d") for row in cur.fetchall()]
+
+
+def _has_daily_bars(settings: Settings, trade_date: str) -> bool:
+    date_value = _to_date(trade_date)
+    if not date_value:
+        return False
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT count(*) AS n
+            FROM {qname(settings, 'daily_bars')}
+            WHERE trade_date=%s AND adj_close IS NOT NULL
+            """,
+            (date_value,),
+        )
+        row = cur.fetchone()
+        return bool(row and int(row["n"] or 0) > 0)
+
+
+def _stock_signal_count(settings: Settings, trade_date: str) -> int:
+    date_value = _to_date(trade_date)
+    if not date_value:
+        return 0
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"SELECT count(*) AS n FROM {qname(settings, 'stock_signal_daily')} WHERE trade_date=%s",
+            (date_value,),
+        )
+        row = cur.fetchone()
+        return int(row["n"] or 0) if row else 0
 
 
 def _a_share_indexes(settings: Settings) -> dict[str, str]:
@@ -209,6 +262,81 @@ def refresh_index_daily(settings: Settings, trade_date: str | None = None) -> di
     }
 
 
+def refresh_index_daily_range(settings: Settings, start_date: str, end_date: str) -> dict[str, Any]:
+    start = _date_text(start_date)
+    end = _date_text(end_date)
+    if len(start) != 8 or len(end) != 8 or start > end:
+        raise RuntimeError(f"Invalid index_daily backfill range: {start_date} to {end_date}")
+
+    fetcher = TushareFetcher(settings)
+    rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    now = datetime.now()
+    for code, name in _a_share_indexes(settings).items():
+        df = fetcher._call(
+            f"index_daily:{code}:{start}-{end}",
+            lambda c=code: fetcher.pro.index_daily(ts_code=c, start_date=start, end_date=end),
+        )
+        if df is None or df.empty:
+            warnings.append(f"index_daily {code} returned no rows for {start}-{end}")
+            continue
+        for _, raw in df.iterrows():
+            actual_date = _date_text(raw.get("trade_date"))
+            if len(actual_date) != 8:
+                continue
+            rows.append(
+                {
+                    "trade_date": _to_date(actual_date),
+                    "index_code": code,
+                    "index_name": name,
+                    "open": _num(raw.get("open")),
+                    "high": _num(raw.get("high")),
+                    "low": _num(raw.get("low")),
+                    "close": _num(raw.get("close")),
+                    "pre_close": _num(raw.get("pre_close")),
+                    "change": _num(raw.get("change")),
+                    "pct_chg": _num(raw.get("pct_chg")),
+                    "vol": _num(raw.get("vol")),
+                    "amount": _num(raw.get("amount")),
+                    "source": "tushare.index_daily",
+                    "updated_at": now,
+                }
+            )
+    columns = [
+        "trade_date",
+        "index_code",
+        "index_name",
+        "open",
+        "high",
+        "low",
+        "close",
+        "pre_close",
+        "change",
+        "pct_chg",
+        "vol",
+        "amount",
+        "source",
+        "updated_at",
+    ]
+    with connect() as conn:
+        count = upsert_rows(
+            conn,
+            table=qname(settings, "index_daily"),
+            columns=columns,
+            rows=rows,
+            conflict_columns=["trade_date", "index_code"],
+        )
+        conn.commit()
+    return {
+        "index_daily_backfill_start": _to_date(start),
+        "index_daily_backfill_end": _to_date(end),
+        "index_daily_rows": count,
+        "index_daily_source_rows": len(rows),
+        "index_daily_target_indexes": len(_a_share_indexes(settings)),
+        "index_daily_warnings": warnings,
+    }
+
+
 def _global_data_status(region: str, target_date: str, market_date: str) -> str:
     if not market_date:
         return "missing"
@@ -296,6 +424,108 @@ def refresh_global_index_daily(settings: Settings, trade_date: str | None = None
         "trade_date": _to_date(target),
         "global_index_daily_rows": count,
         "global_index_daily_target_rows": len(_global_indexes(settings)),
+        "global_index_daily_warnings": warnings,
+    }
+
+
+def refresh_global_index_daily_range(settings: Settings, start_date: str, end_date: str) -> dict[str, Any]:
+    start = _date_text(start_date)
+    end = _date_text(end_date)
+    if len(start) != 8 or len(end) != 8 or start > end:
+        raise RuntimeError(f"Invalid global_index_daily backfill range: {start_date} to {end_date}")
+
+    target_dates = _open_trade_dates_between(settings, start, end)
+    if not target_dates:
+        raise RuntimeError(f"No open trade dates for global_index_daily backfill: {start}-{end}")
+
+    fetcher = TushareFetcher(settings)
+    lookback_days = int(settings.section("indexes").get("global_lookback_days", 45))
+    source_start = _start_date(start, lookback_days)
+    rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    now = datetime.now()
+
+    for spec in _global_indexes(settings):
+        region = spec["region"]
+        code = spec["index_code"]
+        name = spec["index_name"]
+        df = fetcher._call(
+            f"index_global:{code}:{source_start}-{end}",
+            lambda c=code: fetcher.pro.index_global(ts_code=c, start_date=source_start, end_date=end),
+        )
+        if df is None or df.empty:
+            warnings.append(f"index_global {code} returned no rows for {source_start}-{end}")
+            continue
+        data = df.copy()
+        data["trade_date"] = data["trade_date"].astype(str).str.replace("-", "").str[:8]
+        data = data[data["trade_date"].str.len() == 8].sort_values("trade_date")
+        records = data.to_dict("records")
+        if not records:
+            warnings.append(f"index_global {code} has no valid trade_date rows for {source_start}-{end}")
+            continue
+        pos = 0
+        latest: dict[str, Any] | None = None
+        for target in target_dates:
+            while pos < len(records) and str(records[pos].get("trade_date")) <= target:
+                latest = records[pos]
+                pos += 1
+            if not latest:
+                warnings.append(f"index_global {code} has no row <= {target}")
+                continue
+            market_date = _date_text(latest.get("trade_date"))
+            rows.append(
+                {
+                    "trade_date": _to_date(target),
+                    "market_date": _to_date(market_date),
+                    "region": region,
+                    "index_code": code,
+                    "index_name": name,
+                    "open": _num(latest.get("open")),
+                    "high": _num(latest.get("high")),
+                    "low": _num(latest.get("low")),
+                    "close": _num(latest.get("close")),
+                    "pre_close": _num(latest.get("pre_close")),
+                    "change": _num(latest.get("change")),
+                    "pct_chg": _num(latest.get("pct_chg")),
+                    "source": "tushare.index_global",
+                    "data_status": _global_data_status(region, target, market_date),
+                    "updated_at": now,
+                }
+            )
+
+    columns = [
+        "trade_date",
+        "market_date",
+        "region",
+        "index_code",
+        "index_name",
+        "open",
+        "high",
+        "low",
+        "close",
+        "pre_close",
+        "change",
+        "pct_chg",
+        "source",
+        "data_status",
+        "updated_at",
+    ]
+    with connect() as conn:
+        count = upsert_rows(
+            conn,
+            table=qname(settings, "global_index_daily"),
+            columns=columns,
+            rows=rows,
+            conflict_columns=["trade_date", "index_code"],
+        )
+        conn.commit()
+    return {
+        "global_index_daily_backfill_start": _to_date(start),
+        "global_index_daily_backfill_end": _to_date(end),
+        "global_index_daily_target_dates": len(target_dates),
+        "global_index_daily_rows": count,
+        "global_index_daily_source_rows": len(rows),
+        "global_index_daily_target_indexes": len(_global_indexes(settings)),
         "global_index_daily_warnings": warnings,
     }
 
@@ -502,7 +732,91 @@ def refresh_dragon_leader_daily(settings: Settings, trade_date: str | None = Non
     }
 
 
+def refresh_dragon_leader_daily_range(
+    settings: Settings,
+    start_date: str,
+    end_date: str,
+    *,
+    generate_missing_signals: bool = True,
+) -> dict[str, Any]:
+    start = _date_text(start_date)
+    end = _date_text(end_date)
+    if len(start) != 8 or len(end) != 8 or start > end:
+        raise RuntimeError(f"Invalid dragon_leader_daily backfill range: {start_date} to {end_date}")
+
+    dates = _open_trade_dates_between(settings, start, end)
+    warnings: list[str] = []
+    skipped_no_bars: list[str] = []
+    skipped_no_signals: list[str] = []
+    generated_signal_dates = 0
+    refreshed_dates = 0
+    total_rows = 0
+
+    refresh_final_signal_layers = None
+    if generate_missing_signals:
+        from .trading_signals import refresh_final_signal_layers as _refresh_final_signal_layers
+
+        refresh_final_signal_layers = _refresh_final_signal_layers
+
+    for idx, trade_date in enumerate(dates, 1):
+        date_value = _to_date(trade_date)
+        if not date_value:
+            continue
+        if not _has_daily_bars(settings, trade_date):
+            skipped_no_bars.append(date_value)
+            continue
+        try:
+            if generate_missing_signals and _stock_signal_count(settings, trade_date) == 0:
+                assert refresh_final_signal_layers is not None
+                refresh_final_signal_layers(settings, trade_date)
+                generated_signal_dates += 1
+            if _stock_signal_count(settings, trade_date) == 0:
+                skipped_no_signals.append(date_value)
+                continue
+            metrics = refresh_dragon_leader_daily(settings, trade_date)
+            refreshed_dates += 1
+            total_rows += int(metrics.get("dragon_leader_daily_rows") or 0)
+            LOGGER.info(
+                "dragon leader backfill %s/%s %s rows=%s",
+                idx,
+                len(dates),
+                date_value,
+                metrics.get("dragon_leader_daily_rows"),
+            )
+        except Exception as exc:
+            warnings.append(f"{date_value}: {type(exc).__name__}: {exc}")
+            LOGGER.exception("dragon leader backfill failed for %s", date_value)
+
+    return {
+        "dragon_leader_backfill_start": _to_date(start),
+        "dragon_leader_backfill_end": _to_date(end),
+        "dragon_leader_target_dates": len(dates),
+        "dragon_leader_refreshed_dates": refreshed_dates,
+        "dragon_leader_generated_signal_dates": generated_signal_dates,
+        "dragon_leader_rows": total_rows,
+        "dragon_leader_skipped_no_bars": len(skipped_no_bars),
+        "dragon_leader_skipped_no_signals": len(skipped_no_signals),
+        "dragon_leader_warning_count": len(warnings),
+        "dragon_leader_warning_samples": warnings[:20],
+    }
+
+
 def refresh_market_structure_layers(settings: Settings, trade_date: str | None = None) -> dict[str, Any]:
     index_metrics = refresh_index_daily(settings, trade_date=trade_date)
     global_metrics = refresh_global_index_daily(settings, trade_date=trade_date or index_metrics.get("trade_date"))
     return {**index_metrics, **global_metrics}
+
+
+def backfill_market_structure_layers(
+    settings: Settings,
+    start_date: str,
+    end_date: str,
+    *,
+    include_dragon_leaders: bool = True,
+) -> dict[str, Any]:
+    index_metrics = refresh_index_daily_range(settings, start_date, end_date)
+    global_metrics = refresh_global_index_daily_range(settings, start_date, end_date)
+    dragon_metrics: dict[str, Any] = {}
+    if include_dragon_leaders:
+        dragon_metrics = refresh_dragon_leader_daily_range(settings, start_date, end_date)
+    return {**index_metrics, **global_metrics, **dragon_metrics}

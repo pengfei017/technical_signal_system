@@ -74,6 +74,7 @@
   "signals": {
     "mode": "mixed",
     "min_history_days": 60,
+    "stock_signal_history_trading_days": 180,
     "moving_averages": [5, 10, 20, 60],
     "rsi_period": 14,
     "macd_fast": 12,

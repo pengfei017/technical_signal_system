@@ -30,7 +30,7 @@
 - 前复权价格字段每天按数据库已有的全部 `daily_bars` 历史重算，不局限于 90 天。
 - 个股资金流默认按交易日拉全市场 `pro.moneyflow(trade_date=...)`，日常只拉最近 5 个交易日。
 - 成交量和成交额随日线入库；量能状态使用不含当日的前 5 日均量判断，放量突破/缩量回踩使用不含当日的前 20 日均量确认。
-- `stock_signal_daily` 每次从数据库已有全 A 历史重算，不局限于观察池/自选股范围。
+- `stock_signal_daily` 不局限于观察池/自选股范围；默认使用近 180 个交易日生成全 A 个股交易信号，避免历史库变大后每天重复扫描多年全量数据。
 - 日报里的个股交易信号和龙虎榜确认暂时只展示 `signal_universe`，也就是自选股 + 观察池；全市场结果先保留在数据库里。
 - 涨停/炸板/跌停使用 Tushare `limit_list_d`，龙虎榜使用 `top_list` / `top_inst`，市场/行业/概念资金流使用 Tushare 对应资金流接口；抓取阶段会记录失败细节，晚间处理和报告前会统一验数，验不过不出新报告。
 
@@ -46,6 +46,7 @@ python run_technical_signal.py update-indexes
 python run_technical_signal.py update-global-indexes
 python run_technical_signal.py backfill-daily --year 2010
 python run_technical_signal.py backfill-daily --start-date 2010-01-01 --end-date 2010-12-31
+python run_technical_signal.py backfill-market-layers --year 2026
 python run_technical_signal.py validate-data
 python run_technical_signal.py refresh-dragon-leaders
 python run_technical_signal.py process
@@ -56,7 +57,7 @@ python run_technical_signal.py report
 python install_windows_task.py
 ```
 
-说明：日常自动化使用拆分任务；`run` 保留为手动全流程；`--days` 用于首轮初始化或需要补历史数据时手动扩大抓取窗口。`backfill-daily` 用于慢速回补历史日线、复权因子和 daily_basic，默认每次 Tushare 请求后等待 1.2 秒，失败后可重新运行续补。Tushare 单接口失败会短重试，抓取/晚间流水线整条失败会等待 20 分钟重试，最多再试 2 次。
+说明：日常自动化使用拆分任务；`run` 保留为手动全流程；`--days` 用于首轮初始化或需要补历史数据时手动扩大抓取窗口。`backfill-daily` 用于慢速回补历史日线、复权因子和 daily_basic，默认每次 Tushare 请求后等待 1.2 秒，失败后可重新运行续补。`backfill-market-layers` 用于按日期区间补 `index_daily`、`global_index_daily` 和 `dragon_leader_daily`；龙头候选只做技术层评分，若当天底层全 A 信号不存在会先生成 `stock_signal_daily` / `theme_signal_daily`。Tushare 单接口失败会短重试，抓取/晚间流水线整条失败会等待 20 分钟重试，最多再试 2 次。
 
 定时任务：
 

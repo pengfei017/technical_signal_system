@@ -18,6 +18,7 @@ from tech_signal.analyzer import compute_signals
 from tech_signal.config import load_settings
 from tech_signal.db import connect, init_schema, qname
 from tech_signal.market_layers import (
+    backfill_market_structure_layers,
     refresh_dragon_leader_daily,
     refresh_global_index_daily,
     refresh_index_daily,
@@ -457,6 +458,7 @@ RETRYABLE_COMMANDS = {
     "update-indexes",
     "update-global-indexes",
     "backfill-daily",
+    "backfill-market-layers",
     "refresh-dragon-leaders",
     "evening-pipeline",
     "run",
@@ -490,6 +492,26 @@ def execute_command(settings, args) -> dict[str, Any]:
             start_date=start_date,
             end_date=end_date,
             sleep_seconds=args.sleep_seconds,
+        )
+    if args.command == "backfill-market-layers":
+        if args.year:
+            start_date = args.start_date or f"{args.year}0101"
+            if args.end_date:
+                end_date = args.end_date
+            elif args.year >= datetime.now().year:
+                end_date = _expected_latest_open_date(settings) or _latest_daily_bar_trade_date(settings)
+            else:
+                end_date = f"{args.year}1231"
+        else:
+            start_date = args.start_date or f"{datetime.now().year}0101"
+            end_date = args.end_date or _expected_latest_open_date(settings) or _latest_daily_bar_trade_date(settings)
+        if not start_date or not end_date:
+            raise RuntimeError("backfill-market-layers requires a valid date range")
+        return backfill_market_structure_layers(
+            settings,
+            start_date=start_date,
+            end_date=end_date,
+            include_dragon_leaders=not args.skip_dragon_leaders,
         )
     if args.command == "validate-data":
         return validate_data_ready(
@@ -559,6 +581,7 @@ def main() -> int:
             "update-indexes",
             "update-global-indexes",
             "backfill-daily",
+            "backfill-market-layers",
             "validate-data",
             "analyze",
             "report",
@@ -577,6 +600,7 @@ def main() -> int:
     parser.add_argument("--trade-date", default=None, help="YYYY-MM-DD, default latest")
     parser.add_argument("--date", default=None, help="Alias of --trade-date; use 最近交易日 or latest for default latest")
     parser.add_argument("--skip-moneyflow", action="store_true")
+    parser.add_argument("--skip-dragon-leaders", action="store_true")
     args = parser.parse_args()
     if args.date and not args.trade_date:
         args.trade_date = args.date

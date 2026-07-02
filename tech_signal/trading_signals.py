@@ -104,6 +104,26 @@ def _safe_call(fetcher: TushareFetcher, label: str, fn) -> tuple[pd.DataFrame, s
         return pd.DataFrame(), f"{label} failed: {type(exc).__name__}: {exc}"
 
 
+def _history_start_date(settings: Settings, trade_date: str, trading_days: int) -> str | None:
+    date_value = _to_date(trade_date)
+    if not date_value or trading_days <= 0:
+        return None
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT cal_date
+            FROM {qname(settings, 'trade_calendar')}
+            WHERE is_open=true AND cal_date <= %s
+            ORDER BY cal_date DESC
+            OFFSET %s
+            LIMIT 1
+            """,
+            (date_value, max(0, trading_days - 1)),
+        )
+        row = cur.fetchone()
+        return str(row["cal_date"]) if row and row["cal_date"] else None
+
+
 def _stock_meta() -> dict[str, dict[str, Any]]:
     with connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT to_regclass('public.stock_master') AS table_name")
@@ -908,6 +928,13 @@ def refresh_stock_signal_daily(settings: Settings, trade_date: str | None = None
             date_value = str(row["d"]) if row and row["d"] else ""
         if not date_value:
             raise RuntimeError("No trade_date available for stock_signal_daily")
+        history_days = int(settings.section("signals").get("stock_signal_history_trading_days", 180))
+        history_start = _history_start_date(settings, date_value, history_days)
+        history_filter = ""
+        params: list[Any] = [date_value]
+        if history_start:
+            history_filter = "AND b.trade_date >= %s"
+            params.append(history_start)
         cur.execute(
             f"""
             SELECT b.*, db.turnover_rate, db.volume_ratio, mf.net_mf_amount,
@@ -918,10 +945,11 @@ def refresh_stock_signal_daily(settings: Settings, trade_date: str | None = None
             LEFT JOIN {qname(settings, 'moneyflow_daily')} mf
               ON mf.ts_code=b.ts_code AND mf.trade_date=b.trade_date
             WHERE b.trade_date <= %s
+              {history_filter}
               AND b.adj_close IS NOT NULL
             ORDER BY b.ts_code, b.trade_date
             """,
-            (date_value,),
+            tuple(params),
         )
         bar_rows = cur.fetchall()
         cur.execute(f"SELECT * FROM {qname(settings, 'limit_events')} WHERE trade_date=%s", (date_value,))
