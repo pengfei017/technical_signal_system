@@ -25,6 +25,34 @@
     "limit_lhb_enabled": true,
     "market_moneyflow_enabled": true
   },
+  "indexes": {
+    "a_share_lookback_days": 20,
+    "global_lookback_days": 45,
+    "a_share": {
+      "000001.SH": "上证指数",
+      "399001.SZ": "深成指",
+      "399006.SZ": "创业板指",
+      "000688.SH": "科创50",
+      "000300.SH": "沪深300",
+      "000905.SH": "中证500",
+      "000852.SH": "中证1000",
+      "899050.BJ": "北证50"
+    },
+    "global": [
+      {"region": "US", "index_code": "DJI", "index_name": "道琼斯"},
+      {"region": "US", "index_code": "SPX", "index_name": "标普500"},
+      {"region": "US", "index_code": "IXIC", "index_name": "纳斯达克"},
+      {"region": "Europe", "index_code": "GDAXI", "index_name": "德国DAX"},
+      {"region": "Europe", "index_code": "FCHI", "index_name": "法国CAC40"},
+      {"region": "Europe", "index_code": "FTSE", "index_name": "英国富时100"},
+      {"region": "Asia", "index_code": "N225", "index_name": "日经225"},
+      {"region": "Asia", "index_code": "KS11", "index_name": "韩国KOSPI"}
+    ]
+  },
+  "dragon_leader": {
+    "top_n": 300,
+    "min_amount_yi": 20.0
+  },
   "automation": {
     "task_retry_count": 2,
     "task_retry_sleep_seconds": 1200

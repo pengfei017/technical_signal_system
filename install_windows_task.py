@@ -26,6 +26,12 @@ TASKS = [
         "command": r'wscript.exe D:\technical_signal_system\run_technical_signal_hidden.vbs update-market-data',
     },
     {
+        "name": "TechnicalSignalGlobalIndexMorning",
+        "schedule": ["DAILY"],
+        "time": "06:40",
+        "command": r'wscript.exe D:\technical_signal_system\run_technical_signal_hidden.vbs update-global-indexes',
+    },
+    {
         "name": "TechnicalSignalEveningPipelineDaily",
         "schedule": ["DAILY"],
         "time": "20:20",

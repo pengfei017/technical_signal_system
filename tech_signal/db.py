@@ -231,6 +231,49 @@ def init_schema(settings: Settings) -> None:
         )
         cur.execute(
             f"""
+            CREATE TABLE IF NOT EXISTS {schema}.index_daily (
+                trade_date date NOT NULL,
+                index_code text NOT NULL,
+                index_name text,
+                open numeric,
+                high numeric,
+                low numeric,
+                close numeric,
+                pre_close numeric,
+                change numeric,
+                pct_chg numeric,
+                vol numeric,
+                amount numeric,
+                source text NOT NULL DEFAULT 'tushare.index_daily',
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (trade_date, index_code)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.global_index_daily (
+                trade_date date NOT NULL,
+                market_date date NOT NULL,
+                region text NOT NULL,
+                index_code text NOT NULL,
+                index_name text,
+                open numeric,
+                high numeric,
+                low numeric,
+                close numeric,
+                pre_close numeric,
+                change numeric,
+                pct_chg numeric,
+                source text NOT NULL DEFAULT 'tushare.index_global',
+                data_status text NOT NULL DEFAULT '',
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (trade_date, index_code)
+            )
+            """
+        )
+        cur.execute(
+            f"""
             CREATE TABLE IF NOT EXISTS {schema}.limit_events (
                 trade_date date NOT NULL,
                 ts_code text NOT NULL,
@@ -457,6 +500,36 @@ def init_schema(settings: Settings) -> None:
             )
             """
         )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.dragon_leader_daily (
+                trade_date date NOT NULL,
+                ts_code text NOT NULL,
+                name text,
+                industry text,
+                concepts text,
+                pct_chg numeric,
+                amount_yi numeric,
+                turnover_rate numeric,
+                volume_ratio numeric,
+                limit_status text,
+                is_limit_up boolean NOT NULL DEFAULT false,
+                is_broken_board boolean NOT NULL DEFAULT false,
+                limit_times numeric,
+                lhb_net_buy_yi numeric,
+                institution_net_buy_yi numeric,
+                northbound_net_buy_yi numeric,
+                theme_names jsonb NOT NULL DEFAULT '[]'::jsonb,
+                leader_score numeric,
+                leader_rank integer,
+                leader_level text,
+                reason text,
+                risk_flags jsonb NOT NULL DEFAULT '[]'::jsonb,
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (trade_date, ts_code)
+            )
+            """
+        )
         cur.execute(f"ALTER TABLE {schema}.technical_signals ADD COLUMN IF NOT EXISTS prev_vol_ma5 numeric")
         cur.execute(f"ALTER TABLE {schema}.technical_signals ADD COLUMN IF NOT EXISTS prev_vol_ma20 numeric")
         cur.execute(f"ALTER TABLE {schema}.technical_signals ADD COLUMN IF NOT EXISTS volume_ratio_5 numeric")
@@ -467,11 +540,14 @@ def init_schema(settings: Settings) -> None:
         cur.execute(f"ALTER TABLE {schema}.latest_signals ADD COLUMN IF NOT EXISTS volume_ratio_20 numeric")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_daily_bars_date ON {schema}.daily_bars(trade_date)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_daily_basic_date ON {schema}.daily_basic(trade_date)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_index_daily_date ON {schema}.index_daily(trade_date)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_global_index_daily_date ON {schema}.global_index_daily(trade_date, market_date)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_signals_date ON {schema}.technical_signals(trade_date)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_signals_level ON {schema}.technical_signals(signal_level)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_stock_signal_date_score ON {schema}.stock_signal_daily(trade_date, total_signal_score DESC)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_stock_signal_level ON {schema}.stock_signal_daily(signal_level)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_theme_signal_date_score ON {schema}.theme_signal_daily(trade_date, heat_score DESC)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_dragon_leader_date_rank ON {schema}.dragon_leader_daily(trade_date, leader_rank)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_limit_events_date_type ON {schema}.limit_events(trade_date, limit_type)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_lhb_stocks_date_net ON {schema}.lhb_stocks(trade_date, lhb_net_buy_yi DESC)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_moneyflow_stock_date ON {schema}.moneyflow_stock(trade_date)")

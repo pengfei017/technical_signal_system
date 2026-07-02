@@ -17,6 +17,12 @@ from typing import Any
 from tech_signal.analyzer import compute_signals
 from tech_signal.config import load_settings
 from tech_signal.db import connect, init_schema, qname
+from tech_signal.market_layers import (
+    refresh_dragon_leader_daily,
+    refresh_global_index_daily,
+    refresh_index_daily,
+    refresh_market_structure_layers,
+)
 from tech_signal.report import generate_report
 from tech_signal.trading_signals import update_trading_auxiliary
 from tech_signal.tushare_fetcher import TushareFetcher
@@ -303,6 +309,7 @@ def update_market_data(settings, *, days: int | None = None) -> dict[str, Any]:
 
     market_metrics = fetcher.fetch_market_for_dates(dates)
     effective_trade_date = market_metrics.get("latest_trade_date") or dates[-1]
+    index_metrics = refresh_index_daily(settings, trade_date=str(effective_trade_date))
     members = load_focus_universe(settings)
     universe_count = sync_signal_universe(settings, members)
     return {
@@ -313,6 +320,7 @@ def update_market_data(settings, *, days: int | None = None) -> dict[str, Any]:
         "bootstrap_backfill": bootstrap_backfill,
         "universe_rows": universe_count,
         **market_metrics,
+        **index_metrics,
     }
 
 
@@ -406,8 +414,9 @@ def process_signals(
     members = load_focus_universe(settings)
     sync_signal_universe(settings, members)
     signal_metrics = compute_signals(settings, trade_date=_dash_date(trade_date))
+    leader_metrics = refresh_dragon_leader_daily(settings, trade_date=str(signal_metrics["trade_date"]))
     report_path = generate_report(settings, trade_date=str(signal_metrics["trade_date"]))
-    return {**validation_metrics, **signal_metrics, "report_file": str(report_path)}
+    return {**validation_metrics, **signal_metrics, **leader_metrics, "report_file": str(report_path)}
 
 
 def evening_pipeline(settings, *, skip_moneyflow: bool = False) -> dict[str, Any]:
@@ -445,7 +454,10 @@ RETRYABLE_COMMANDS = {
     "update-market-data",
     "update-trading-data",
     "update-data",
+    "update-indexes",
+    "update-global-indexes",
     "backfill-daily",
+    "refresh-dragon-leaders",
     "evening-pipeline",
     "run",
 }
@@ -460,6 +472,10 @@ def execute_command(settings, args) -> dict[str, Any]:
         return update_trading_data(settings, skip_moneyflow=args.skip_moneyflow)
     if args.command == "update-data":
         return update_data(settings, days=args.days, skip_moneyflow=args.skip_moneyflow)
+    if args.command == "update-indexes":
+        return refresh_market_structure_layers(settings, trade_date=args.trade_date)
+    if args.command == "update-global-indexes":
+        return refresh_global_index_daily(settings, trade_date=args.trade_date)
     if args.command == "backfill-daily":
         if args.year:
             start_date = f"{args.year}0101"
@@ -494,6 +510,8 @@ def execute_command(settings, args) -> dict[str, Any]:
     if args.command == "report":
         path = generate_report(settings, trade_date=args.trade_date)
         return {"report_file": str(path)}
+    if args.command == "refresh-dragon-leaders":
+        return refresh_dragon_leader_daily(settings, trade_date=args.trade_date)
     if args.command == "process":
         return process_signals(
             settings,
@@ -530,16 +548,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Independent A-share technical signal system")
     parser.add_argument(
         "command",
+        nargs="?",
+        default="process",
         choices=[
             "init-db",
             "update-calendar",
             "update-market-data",
             "update-trading-data",
             "update-data",
+            "update-indexes",
+            "update-global-indexes",
             "backfill-daily",
             "validate-data",
             "analyze",
             "report",
+            "refresh-dragon-leaders",
             "process",
             "evening-pipeline",
             "run",
@@ -552,8 +575,15 @@ def main() -> int:
     parser.add_argument("--end-date", default=None, help="YYYY-MM-DD for historical daily backfill")
     parser.add_argument("--sleep-seconds", type=float, default=None, help="Override per-request sleep for historical backfill")
     parser.add_argument("--trade-date", default=None, help="YYYY-MM-DD, default latest")
+    parser.add_argument("--date", default=None, help="Alias of --trade-date; use 最近交易日 or latest for default latest")
     parser.add_argument("--skip-moneyflow", action="store_true")
     args = parser.parse_args()
+    if args.date and not args.trade_date:
+        args.trade_date = args.date
+    if str(args.trade_date or "").strip().lower() in {"latest", "最近交易日"}:
+        args.trade_date = "__latest_available__"
+    if str(args.trade_date or "").strip().lower() in {""}:
+        args.trade_date = None
 
     settings = load_settings(args.config)
     setup_logging(settings.logs_dir / "technical_signal.log")
@@ -572,6 +602,8 @@ def main() -> int:
         if not locked:
             raise RuntimeError(f"Another technical_signal task is running: {lock_path}")
         init_schema(settings)
+        if args.trade_date == "__latest_available__":
+            args.trade_date = _dash_date(_latest_daily_bar_trade_date(settings))
         run_id = start_run(settings, args.command)
         metrics = execute_with_retries(settings, args)
         finish_run(settings, run_id, "finished", metrics=metrics)
