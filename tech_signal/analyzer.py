@@ -8,6 +8,7 @@ import pandas as pd
 from .config import Settings
 from .db import connect, qname, upsert_rows
 from .indicators import add_indicators
+from .trading_signals import refresh_final_signal_layers
 
 
 def _volume_state(row: pd.Series, cfg: dict[str, Any]) -> str:
@@ -355,4 +356,5 @@ def compute_signals(settings: Settings, trade_date: str | None = None) -> dict[s
             conflict_columns=["ts_code"],
         )
         conn.commit()
-    return {"trade_date": trade_date, "signals": signals, "latest": latest}
+    final_metrics = refresh_final_signal_layers(settings, trade_date)
+    return {"trade_date": trade_date, "signals": signals, "latest": latest, **final_metrics}

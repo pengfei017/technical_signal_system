@@ -150,6 +150,172 @@ def init_schema(settings: Settings) -> None:
         )
         cur.execute(
             f"""
+            CREATE TABLE IF NOT EXISTS {schema}.moneyflow_stock (
+                ts_code text NOT NULL,
+                trade_date date NOT NULL,
+                name text,
+                close numeric,
+                pct_chg numeric,
+                amount_yi numeric,
+                turnover_rate numeric,
+                buy_sm_amount numeric,
+                sell_sm_amount numeric,
+                buy_md_amount numeric,
+                sell_md_amount numeric,
+                buy_lg_amount numeric,
+                sell_lg_amount numeric,
+                buy_elg_amount numeric,
+                sell_elg_amount numeric,
+                net_mf_amount numeric,
+                net_mf_amount_yi numeric,
+                net_mf_rate numeric,
+                source text NOT NULL DEFAULT 'tushare.moneyflow',
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (ts_code, trade_date)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.moneyflow_market (
+                trade_date date PRIMARY KEY,
+                pct_change_sh numeric,
+                pct_change_sz numeric,
+                net_amount_yi numeric,
+                net_amount_rate numeric,
+                buy_elg_amount_yi numeric,
+                buy_lg_amount_yi numeric,
+                buy_md_amount_yi numeric,
+                buy_sm_amount_yi numeric,
+                source text NOT NULL DEFAULT 'tushare.moneyflow_mkt_dc',
+                raw jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                updated_at timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.moneyflow_industry (
+                trade_date date NOT NULL,
+                theme_name text NOT NULL,
+                source text NOT NULL,
+                pct_chg numeric,
+                net_amount_yi numeric,
+                net_buy_amount_yi numeric,
+                net_sell_amount_yi numeric,
+                lead_stock text,
+                rank numeric,
+                raw jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (trade_date, source, theme_name)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.moneyflow_concept (
+                trade_date date NOT NULL,
+                theme_name text NOT NULL,
+                source text NOT NULL,
+                pct_chg numeric,
+                net_amount_yi numeric,
+                net_buy_amount_yi numeric,
+                net_sell_amount_yi numeric,
+                lead_stock text,
+                company_num numeric,
+                raw jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (trade_date, source, theme_name)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.limit_events (
+                trade_date date NOT NULL,
+                ts_code text NOT NULL,
+                name text,
+                industry text,
+                limit_type text NOT NULL,
+                close numeric,
+                pct_chg numeric,
+                amount_yi numeric,
+                turnover_rate numeric,
+                fd_amount_yi numeric,
+                first_limit_time text,
+                last_limit_time text,
+                open_times numeric,
+                limit_times numeric,
+                source text NOT NULL DEFAULT 'tushare.limit_list_d',
+                raw jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (trade_date, ts_code, limit_type)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.limit_market_stats (
+                trade_date date PRIMARY KEY,
+                limit_up_count integer NOT NULL DEFAULT 0,
+                limit_down_count integer NOT NULL DEFAULT 0,
+                broken_count integer NOT NULL DEFAULT 0,
+                broken_rate numeric,
+                max_board integer NOT NULL DEFAULT 0,
+                limit_up_industry_distribution jsonb NOT NULL DEFAULT '[]'::jsonb,
+                previous_limit_positive jsonb NOT NULL DEFAULT '[]'::jsonb,
+                previous_limit_negative jsonb NOT NULL DEFAULT '[]'::jsonb,
+                source text,
+                warnings jsonb NOT NULL DEFAULT '[]'::jsonb,
+                updated_at timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.lhb_stocks (
+                trade_date date NOT NULL,
+                ts_code text NOT NULL,
+                name text,
+                close numeric,
+                pct_change numeric,
+                turnover_rate numeric,
+                amount_yi numeric,
+                lhb_amount_yi numeric,
+                lhb_net_buy_yi numeric,
+                net_rate numeric,
+                amount_rate numeric,
+                institution_net_buy_yi numeric,
+                northbound_net_buy_yi numeric,
+                broker_seat_net_buy_yi numeric,
+                top_count integer NOT NULL DEFAULT 0,
+                primary_reason text,
+                reasons jsonb NOT NULL DEFAULT '[]'::jsonb,
+                top_seats jsonb NOT NULL DEFAULT '[]'::jsonb,
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (trade_date, ts_code)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.lhb_seats (
+                trade_date date NOT NULL,
+                ts_code text NOT NULL,
+                name text,
+                exalter text NOT NULL,
+                seat_type text NOT NULL,
+                buy_yi numeric,
+                sell_yi numeric,
+                net_buy_yi numeric,
+                reason text NOT NULL DEFAULT '',
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (trade_date, ts_code, exalter, reason)
+            )
+            """
+        )
+        cur.execute(
+            f"""
             CREATE TABLE IF NOT EXISTS {schema}.signal_universe (
                 ts_code text PRIMARY KEY,
                 name text,
@@ -221,6 +387,76 @@ def init_schema(settings: Settings) -> None:
             )
             """
         )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.stock_signal_daily (
+                trade_date date NOT NULL,
+                ts_code text NOT NULL,
+                name text,
+                industry text,
+                concepts text,
+                close numeric,
+                pct_chg numeric,
+                amount_yi numeric,
+                turnover_rate numeric,
+                volume_ratio numeric,
+                technical_score numeric,
+                price_volume_score numeric,
+                moneyflow_score numeric,
+                limit_score numeric,
+                lhb_score numeric,
+                total_signal_score numeric,
+                signal_level text,
+                trend_phase text,
+                volume_state text,
+                limit_status text,
+                is_limit_up boolean NOT NULL DEFAULT false,
+                is_limit_down boolean NOT NULL DEFAULT false,
+                is_broken_board boolean NOT NULL DEFAULT false,
+                limit_times numeric,
+                open_times numeric,
+                first_limit_time text,
+                last_limit_time text,
+                net_mf_amount numeric,
+                net_mf_amount_yi numeric,
+                net_mf_rate numeric,
+                lhb_net_buy_yi numeric,
+                institution_net_buy_yi numeric,
+                northbound_net_buy_yi numeric,
+                lhb_reason text,
+                tags jsonb NOT NULL DEFAULT '[]'::jsonb,
+                risk_flags jsonb NOT NULL DEFAULT '[]'::jsonb,
+                reason text,
+                data_quality jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (trade_date, ts_code)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.theme_signal_daily (
+                trade_date date NOT NULL,
+                theme_type text NOT NULL,
+                theme_name text NOT NULL,
+                source text,
+                pct_chg numeric,
+                net_amount_yi numeric,
+                limit_up_count integer NOT NULL DEFAULT 0,
+                broken_count integer NOT NULL DEFAULT 0,
+                strong_stock_count integer NOT NULL DEFAULT 0,
+                top_stocks jsonb NOT NULL DEFAULT '[]'::jsonb,
+                related_concepts jsonb NOT NULL DEFAULT '[]'::jsonb,
+                heat_score numeric,
+                momentum_score numeric,
+                persistence_days integer,
+                signal_level text,
+                reason text,
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (trade_date, theme_type, theme_name, source)
+            )
+            """
+        )
         cur.execute(f"ALTER TABLE {schema}.technical_signals ADD COLUMN IF NOT EXISTS prev_vol_ma5 numeric")
         cur.execute(f"ALTER TABLE {schema}.technical_signals ADD COLUMN IF NOT EXISTS prev_vol_ma20 numeric")
         cur.execute(f"ALTER TABLE {schema}.technical_signals ADD COLUMN IF NOT EXISTS volume_ratio_5 numeric")
@@ -233,6 +469,12 @@ def init_schema(settings: Settings) -> None:
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_daily_basic_date ON {schema}.daily_basic(trade_date)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_signals_date ON {schema}.technical_signals(trade_date)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_signals_level ON {schema}.technical_signals(signal_level)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_stock_signal_date_score ON {schema}.stock_signal_daily(trade_date, total_signal_score DESC)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_stock_signal_level ON {schema}.stock_signal_daily(signal_level)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_theme_signal_date_score ON {schema}.theme_signal_daily(trade_date, heat_score DESC)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_limit_events_date_type ON {schema}.limit_events(trade_date, limit_type)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_lhb_stocks_date_net ON {schema}.lhb_stocks(trade_date, lhb_net_buy_yi DESC)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_moneyflow_stock_date ON {schema}.moneyflow_stock(trade_date)")
         conn.commit()
 
 

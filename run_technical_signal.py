@@ -16,6 +16,7 @@ from tech_signal.analyzer import compute_signals
 from tech_signal.config import load_settings
 from tech_signal.db import connect, init_schema, qname
 from tech_signal.report import generate_report
+from tech_signal.trading_signals import update_trading_auxiliary
 from tech_signal.tushare_fetcher import TushareFetcher
 from tech_signal.universe import load_focus_universe, sync_signal_universe
 
@@ -107,6 +108,7 @@ def update_data(settings, *, days: int | None = None, skip_moneyflow: bool = Fal
         )
         moneyflow_dates = dates[-mf_days:]
         moneyflow_count = fetcher.fetch_focus_moneyflow([m.ts_code for m in members], moneyflow_dates)
+    auxiliary_metrics = update_trading_auxiliary(settings, fetcher, str(effective_trade_date))
     return {
         "trade_date": effective_trade_date,
         "target_lookback_trading_days": history_days,
@@ -116,6 +118,7 @@ def update_data(settings, *, days: int | None = None, skip_moneyflow: bool = Fal
         **calendar_metrics,
         "universe_rows": universe_count,
         "moneyflow_rows": moneyflow_count,
+        **auxiliary_metrics,
         **market_metrics,
     }
 

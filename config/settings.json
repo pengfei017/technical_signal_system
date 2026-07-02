@@ -18,7 +18,10 @@
     "retry_count": 3,
     "retry_sleep_seconds": 2.0,
     "refresh_recent_trading_days": 5,
-    "moneyflow_scope": "focus"
+    "moneyflow_scope": "focus",
+    "trading_auxiliary_enabled": true,
+    "limit_lhb_enabled": true,
+    "market_moneyflow_enabled": true
   },
   "signals": {
     "mode": "mixed",
