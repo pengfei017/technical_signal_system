@@ -109,3 +109,7 @@ tech_signal.signal_runs
 - `index_daily`：A 股主要指数日行情，覆盖上证指数、深成指、创业板指、科创50、沪深300、中证500、中证1000、北证50。
 - `global_index_daily`：海外主要指数结构化行情，覆盖道指、标普500、纳指、德国DAX、法国CAC40、英国富时100、日经225、韩国KOSPI；`data_status` 标记最新收盘、同日/盘中或旧数据状态。
 - `dragon_leader_daily`：技术层龙头候选排序，来自全 A 个股交易信号、涨跌停、龙虎榜和主题热度；只写技术评分、排序、原因和风险标签。
+
+指标说明：
+
+- 每个技术指标、评分项和龙头候选字段的计算口径见 `docs/indicator_calculation.md`。
