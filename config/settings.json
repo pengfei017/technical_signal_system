@@ -14,11 +14,12 @@
     "all_a_lookback_trading_days": 90,
     "daily_fetch_recent_trading_days": 5,
     "focus_moneyflow_fetch_recent_trading_days": 5,
+    "stock_moneyflow_fetch_recent_trading_days": 5,
     "request_sleep_seconds": 0.25,
     "retry_count": 3,
     "retry_sleep_seconds": 2.0,
     "refresh_recent_trading_days": 5,
-    "moneyflow_scope": "focus",
+    "moneyflow_scope": "all_market",
     "trading_auxiliary_enabled": true,
     "limit_lhb_enabled": true,
     "market_moneyflow_enabled": true

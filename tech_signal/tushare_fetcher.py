@@ -313,11 +313,38 @@ class TushareFetcher:
             total += self._write_moneyflow(df)
         return total
 
+    def fetch_market_moneyflow(self, dates: list[str]) -> int:
+        if not dates:
+            return 0
+        total = 0
+        for trade_date in dates:
+            df = self._call(
+                f"moneyflow:market:{trade_date}",
+                lambda d=trade_date: self.pro.moneyflow(trade_date=d),
+            )
+            if df.empty:
+                LOGGER.info("market moneyflow empty for %s", trade_date)
+                continue
+            date_value = _to_date(trade_date)
+            with connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    f"DELETE FROM {qname(self.settings, 'moneyflow_daily')} WHERE trade_date=%s",
+                    (date_value,),
+                )
+                conn.commit()
+            count = self._write_moneyflow(df)
+            total += count
+            LOGGER.info("date %s saved market moneyflow rows=%s", trade_date, count)
+        return total
+
     def _write_moneyflow(self, df: pd.DataFrame) -> int:
         rows = []
         for _, row in df.iterrows():
             buy = sum(_num(row.get(col)) or 0.0 for col in ["buy_sm_amount", "buy_md_amount", "buy_lg_amount", "buy_elg_amount"])
             sell = sum(_num(row.get(col)) or 0.0 for col in ["sell_sm_amount", "sell_md_amount", "sell_lg_amount", "sell_elg_amount"])
+            net_mf_amount = _num(row.get("net_mf_amount"))
+            if net_mf_amount is None:
+                net_mf_amount = buy - sell
             rows.append(
                 {
                     "ts_code": row.get("ts_code"),
@@ -330,7 +357,7 @@ class TushareFetcher:
                     "sell_lg_amount": _num(row.get("sell_lg_amount")),
                     "buy_elg_amount": _num(row.get("buy_elg_amount")),
                     "sell_elg_amount": _num(row.get("sell_elg_amount")),
-                    "net_mf_amount": buy - sell,
+                    "net_mf_amount": net_mf_amount,
                 }
             )
         columns = [

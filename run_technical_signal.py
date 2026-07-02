@@ -16,7 +16,7 @@ from tech_signal.analyzer import compute_signals
 from tech_signal.config import load_settings
 from tech_signal.db import connect, init_schema, qname
 from tech_signal.report import generate_report
-from tech_signal.trading_signals import update_trading_auxiliary
+from tech_signal.trading_signals import refresh_final_signal_layers, update_trading_auxiliary
 from tech_signal.tushare_fetcher import TushareFetcher
 from tech_signal.universe import load_focus_universe, sync_signal_universe
 
@@ -99,7 +99,17 @@ def update_data(settings, *, days: int | None = None, skip_moneyflow: bool = Fal
     members = load_focus_universe(settings)
     universe_count = sync_signal_universe(settings, members)
     moneyflow_count = 0
-    if not skip_moneyflow and data_cfg.get("moneyflow_scope", "focus") == "focus":
+    moneyflow_scope = str(data_cfg.get("moneyflow_scope", "all_market"))
+    if not skip_moneyflow and moneyflow_scope == "all_market":
+        mf_days = int(
+            data_cfg.get(
+                "stock_moneyflow_fetch_recent_trading_days",
+                data_cfg.get("focus_moneyflow_fetch_recent_trading_days", fetch_recent_days),
+            )
+        )
+        moneyflow_dates = dates[-mf_days:]
+        moneyflow_count = fetcher.fetch_market_moneyflow(moneyflow_dates)
+    elif not skip_moneyflow and moneyflow_scope == "focus":
         mf_days = int(
             data_cfg.get(
                 "focus_moneyflow_fetch_recent_trading_days",
@@ -115,6 +125,7 @@ def update_data(settings, *, days: int | None = None, skip_moneyflow: bool = Fal
         "fetch_window_trading_days": fetch_days,
         "existing_daily_bar_dates": existing_bar_dates,
         "bootstrap_backfill": bootstrap_backfill,
+        "moneyflow_scope": moneyflow_scope,
         **calendar_metrics,
         "universe_rows": universe_count,
         "moneyflow_rows": moneyflow_count,
@@ -127,10 +138,12 @@ def run_all(settings, args) -> dict:
     init_schema(settings)
     data_metrics = update_data(settings, days=args.days, skip_moneyflow=args.skip_moneyflow)
     signal_metrics = compute_signals(settings, trade_date=None)
+    final_signal_metrics = refresh_final_signal_layers(settings, trade_date=str(signal_metrics["trade_date"]))
     report_path = generate_report(settings, trade_date=str(signal_metrics["trade_date"]))
     return {
         **data_metrics,
         **signal_metrics,
+        **final_signal_metrics,
         "report_file": str(report_path),
     }
 
@@ -168,6 +181,7 @@ def main() -> int:
             members = load_focus_universe(settings)
             sync_signal_universe(settings, members)
             metrics = compute_signals(settings, trade_date=args.trade_date)
+            metrics.update(refresh_final_signal_layers(settings, trade_date=str(metrics["trade_date"])))
         elif args.command == "report":
             path = generate_report(settings, trade_date=args.trade_date)
             metrics = {"report_file": str(path)}

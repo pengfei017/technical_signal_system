@@ -180,10 +180,12 @@ def generate_report(settings: Settings, trade_date: str | None = None) -> Path:
         rows = [dict(row) for row in cur.fetchall()]
         cur.execute(
             f"""
-            SELECT *
-            FROM {qname(settings, 'stock_signal_daily')}
-            WHERE trade_date=%s
-            ORDER BY total_signal_score DESC NULLS LAST, amount_yi DESC NULLS LAST
+            SELECT s.*
+            FROM {qname(settings, 'stock_signal_daily')} s
+            JOIN {qname(settings, 'signal_universe')} u
+              ON u.ts_code=s.ts_code
+            WHERE s.trade_date=%s
+            ORDER BY s.total_signal_score DESC NULLS LAST, s.amount_yi DESC NULLS LAST
             LIMIT %s
             """,
             (trade_date, top_n),
@@ -204,10 +206,12 @@ def generate_report(settings: Settings, trade_date: str | None = None) -> Path:
         limit_stats = cur.fetchone()
         cur.execute(
             f"""
-            SELECT *
-            FROM {qname(settings, 'lhb_stocks')}
-            WHERE trade_date=%s
-            ORDER BY lhb_net_buy_yi DESC NULLS LAST
+            SELECT l.*
+            FROM {qname(settings, 'lhb_stocks')} l
+            JOIN {qname(settings, 'signal_universe')} u
+              ON u.ts_code=l.ts_code
+            WHERE l.trade_date=%s
+            ORDER BY l.lhb_net_buy_yi DESC NULLS LAST
             LIMIT %s
             """,
             (trade_date, top_n),
@@ -241,7 +245,7 @@ def generate_report(settings: Settings, trade_date: str | None = None) -> Path:
         f"- 缩量回踩：{len(pullback)} 只",
         f"- 放量突破：{len(breakout)} 只",
         f"- 风险/转弱：{len(risk)} 只",
-        f"- 个股交易信号表：{len(stock_signal_rows)} 只 Top 样本",
+        f"- 个股交易信号表：{len(stock_signal_rows)} 只自选/观察池 Top 样本",
         f"- 主题交易热度表：{len(theme_rows)} 个 Top 样本",
         "",
     ]
