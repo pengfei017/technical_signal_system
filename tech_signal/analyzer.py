@@ -7,6 +7,7 @@ import pandas as pd
 
 from .config import Settings
 from .db import connect, qname, upsert_rows
+from .formula_spec import load_formula_spec, merged_signal_config
 from .indicators import add_indicators
 from .trading_signals import refresh_final_signal_layers
 
@@ -25,8 +26,7 @@ def _volume_state(row: pd.Series, cfg: dict[str, Any]) -> str:
     return "量能正常"
 
 
-def _score_row(row: pd.Series, settings: Settings) -> dict[str, Any]:
-    cfg = settings.section("signals")
+def _score_row(row: pd.Series, cfg: dict[str, Any]) -> dict[str, Any]:
     tags: list[str] = []
     risks: list[str] = []
     score = 50.0
@@ -214,7 +214,9 @@ def compute_signals(settings: Settings, trade_date: str | None = None) -> dict[s
     ]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = add_indicators(df)
+    formula_spec = load_formula_spec(settings)
+    signal_cfg = merged_signal_config(settings, formula_spec)
+    df = add_indicators(df, formula_spec)
     current = df[df["trade_date"].astype(str) == trade_date].copy()
     if current.empty:
         raise RuntimeError(f"No current rows for {trade_date}")
@@ -224,7 +226,7 @@ def compute_signals(settings: Settings, trade_date: str | None = None) -> dict[s
     out_rows = []
     latest_rows = []
     for _, row in current.iterrows():
-        scored = _score_row(row, settings)
+        scored = _score_row(row, signal_cfg)
         ts_code = row["ts_code"]
         data_quality = {
             "history_days": int(history_counts.get(ts_code, 0)),

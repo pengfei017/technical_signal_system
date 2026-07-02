@@ -142,7 +142,7 @@ class TushareFetcher:
         metrics["calendar_rows"] = count
         return metrics
 
-    def fetch_market_for_dates(self, dates: list[str], *, refresh_adjusted_scope: str = "all") -> dict[str, int | str]:
+    def fetch_market_for_dates(self, dates: list[str], *, refresh_adjusted_scope: str = "smart") -> dict[str, int | str]:
         metrics: dict[str, int | str] = {
             "daily_bars": 0,
             "daily_basic": 0,
@@ -150,6 +150,7 @@ class TushareFetcher:
             "empty_dates": 0,
             "latest_trade_date": "",
             "adjusted_price_rows": 0,
+            "adjusted_price_changed_factor_stocks": 0,
         }
         refresh_recent = int(self.settings.section("data").get("refresh_recent_trading_days", 3))
         refresh_set = set(dates[-refresh_recent:]) if refresh_recent > 0 else set()
@@ -176,8 +177,18 @@ class TushareFetcher:
             LOGGER.info("date %s saved bars=%s basic=%s", trade_date, bars_count, basic_count)
         if refresh_adjusted_scope == "range":
             metrics["adjusted_price_rows"] = self.refresh_adjusted_prices(dates)
+        elif refresh_adjusted_scope == "smart":
+            changed_codes = self._latest_factor_changed_codes(dates)
+            metrics["adjusted_price_changed_factor_stocks"] = len(changed_codes)
+            metrics["adjusted_price_rows"] = self.refresh_adjusted_prices(dates, ts_codes=changed_codes)
         else:
             metrics["adjusted_price_rows"] = self.refresh_adjusted_prices()
+        LOGGER.info(
+            "refresh adjusted prices scope=%s rows=%s changed_factor_stocks=%s",
+            refresh_adjusted_scope,
+            metrics["adjusted_price_rows"],
+            metrics["adjusted_price_changed_factor_stocks"],
+        )
         return metrics
 
     def _write_daily_bars(self, daily: pd.DataFrame, adj: pd.DataFrame) -> int:
@@ -269,14 +280,69 @@ class TushareFetcher:
             conn.commit()
         return count
 
-    def refresh_adjusted_prices(self, dates: list[str] | None = None) -> int:
+    def _latest_factor_changed_codes(self, dates: list[str] | None = None) -> list[str]:
         start = _to_date(dates[0]) if dates else None
         end = _to_date(dates[-1]) if dates else None
-        range_sql = ""
-        params: tuple[str | None, ...] = ()
+        if not start or not end:
+            return []
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"""
+                WITH candidates AS (
+                    SELECT DISTINCT ts_code
+                    FROM {qname(self.settings, 'daily_bars')}
+                    WHERE trade_date BETWEEN %s AND %s
+                      AND adj_factor IS NOT NULL
+                ),
+                latest AS (
+                    SELECT c.ts_code, b.trade_date, b.adj_factor
+                    FROM candidates c
+                    JOIN LATERAL (
+                        SELECT trade_date, adj_factor
+                        FROM {qname(self.settings, 'daily_bars')} b
+                        WHERE b.ts_code = c.ts_code
+                          AND b.adj_factor IS NOT NULL
+                        ORDER BY b.trade_date DESC
+                        LIMIT 1
+                    ) b ON true
+                    WHERE b.trade_date BETWEEN %s AND %s
+                ),
+                previous AS (
+                    SELECT l.ts_code, p.adj_factor
+                    FROM latest l
+                    JOIN LATERAL (
+                        SELECT adj_factor
+                        FROM {qname(self.settings, 'daily_bars')} p
+                        WHERE p.ts_code = l.ts_code
+                          AND p.adj_factor IS NOT NULL
+                          AND p.trade_date < l.trade_date
+                        ORDER BY p.trade_date DESC
+                        LIMIT 1
+                    ) p ON true
+                )
+                SELECT l.ts_code
+                FROM latest l
+                JOIN previous p ON p.ts_code = l.ts_code
+                WHERE l.adj_factor IS DISTINCT FROM p.adj_factor
+                ORDER BY l.ts_code
+                """,
+                (start, end, start, end),
+            )
+            return [str(row["ts_code"]) for row in cur.fetchall()]
+
+    def refresh_adjusted_prices(self, dates: list[str] | None = None, *, ts_codes: list[str] | None = None) -> int:
+        start = _to_date(dates[0]) if dates else None
+        end = _to_date(dates[-1]) if dates else None
+        filters: list[str] = []
+        params: list[object] = []
         if start and end:
-            range_sql = "AND b.trade_date BETWEEN %s AND %s"
-            params = (start, end)
+            filters.append("b.trade_date BETWEEN %s AND %s")
+            params.extend([start, end])
+        code_values = sorted({code for code in (ts_codes or []) if code})
+        if code_values:
+            filters.append("b.ts_code = ANY(%s)")
+            params.append(code_values)
+        scope_sql = f"AND ({' OR '.join(filters)})" if filters else ""
         with connect() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
@@ -293,7 +359,7 @@ class TushareFetcher:
                     adj_close = CASE WHEN l.latest_adj_factor IS NULL OR l.latest_adj_factor = 0 THEN b.close ELSE b.close * b.adj_factor / l.latest_adj_factor END
                 FROM latest_factor l
                 WHERE b.ts_code = l.ts_code
-                  {range_sql}
+                  {scope_sql}
                 """,
                 params,
             )

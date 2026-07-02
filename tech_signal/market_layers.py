@@ -9,6 +9,7 @@ import pandas as pd
 
 from .config import Settings
 from .db import connect, qname, upsert_rows
+from .formula_spec import formula_section, load_formula_spec
 from .tushare_fetcher import TushareFetcher
 
 
@@ -573,7 +574,12 @@ def _matched_themes(row: dict[str, Any], themes: dict[str, dict[str, Any]]) -> l
     return matched[:5]
 
 
-def _leader_score(row: dict[str, Any], matched_themes: list[dict[str, Any]]) -> tuple[float, list[str], list[str]]:
+def _leader_score(
+    row: dict[str, Any],
+    matched_themes: list[dict[str, Any]],
+    scoring: dict[str, Any] | None = None,
+) -> tuple[float, list[str], list[str]]:
+    scoring = scoring or {}
     pct = float(row.get("pct_chg") or 0)
     amount_yi = float(row.get("amount_yi") or 0)
     turnover = float(row.get("turnover_rate") or 0)
@@ -584,22 +590,24 @@ def _leader_score(row: dict[str, Any], matched_themes: list[dict[str, Any]]) -> 
     north = float(row.get("northbound_net_buy_yi") or 0)
     limit_times = float(row.get("limit_times") or 0)
 
-    score = 35.0
-    score += max(min(pct, 20), -20) * 1.6
-    score += min(max(amount_yi, 0), 300) * 0.08
-    score += min(max(turnover, 0), 30) * 0.55
-    score += min(max(volume_ratio, 0), 8) * 1.8
-    score += max(min(total_signal - 50, 40), -30) * 0.35
+    score = float(scoring.get("base", 35.0))
+    pct_limit = float(scoring.get("pct_chg_limit", 20.0))
+    score += max(min(pct, pct_limit), -pct_limit) * float(scoring.get("pct_chg_weight", 1.6))
+    score += min(max(amount_yi, 0), float(scoring.get("amount_yi_limit", 300.0))) * float(scoring.get("amount_yi_weight", 0.08))
+    score += min(max(turnover, 0), float(scoring.get("turnover_rate_limit", 30.0))) * float(scoring.get("turnover_rate_weight", 0.55))
+    score += min(max(volume_ratio, 0), float(scoring.get("volume_ratio_limit", 8.0))) * float(scoring.get("volume_ratio_weight", 1.8))
+    signal_delta = total_signal - float(scoring.get("total_signal_offset", 50.0))
+    score += max(min(signal_delta, float(scoring.get("total_signal_delta_high", 40.0))), float(scoring.get("total_signal_delta_low", -30.0))) * float(scoring.get("total_signal_weight", 0.35))
     if row.get("is_limit_up"):
-        score += 16 + min(limit_times, 5) * 3.5
+        score += float(scoring.get("limit_up_bonus", 16.0)) + min(limit_times, float(scoring.get("limit_times_limit", 5.0))) * float(scoring.get("limit_times_weight", 3.5))
     elif row.get("is_broken_board"):
-        score += 3
-    score += min(max(lhb_net, 0), 10) * 1.4
-    score += min(max(inst, 0), 5) * 2.0
-    score += min(max(north, 0), 5) * 1.6
+        score += float(scoring.get("broken_board_bonus", 3.0))
+    score += min(max(lhb_net, 0), float(scoring.get("lhb_net_buy_yi_limit", 10.0))) * float(scoring.get("lhb_net_buy_yi_weight", 1.4))
+    score += min(max(inst, 0), float(scoring.get("institution_net_buy_yi_limit", 5.0))) * float(scoring.get("institution_net_buy_yi_weight", 2.0))
+    score += min(max(north, 0), float(scoring.get("northbound_net_buy_yi_limit", 5.0))) * float(scoring.get("northbound_net_buy_yi_weight", 1.6))
     if matched_themes:
         heat = max(float(item.get("heat_score") or 0) for item in matched_themes)
-        score += max(heat - 60, 0) * 0.25
+        score += max(heat - float(scoring.get("theme_heat_base", 60.0)), 0) * float(scoring.get("theme_heat_weight", 0.25))
 
     reasons = [
         f"涨跌幅{pct:.2f}%",
@@ -624,14 +632,19 @@ def _leader_score(row: dict[str, Any], matched_themes: list[dict[str, Any]]) -> 
     risks = [str(x) for x in _parse_json_list(row.get("risk_flags")) if x]
     if row.get("is_broken_board") and "炸板" not in risks:
         risks.append("炸板")
-    if turnover >= 25 and "高换手" not in risks:
+    risk_thresholds = formula_section(scoring, "risk_thresholds")
+    if turnover >= float(risk_thresholds.get("high_turnover_rate", 25.0)) and "高换手" not in risks:
         risks.append("高换手")
     if str(row.get("volume_state") or "") == "放量下跌" and "放量下跌" not in risks:
         risks.append("放量下跌")
-    return round(_bounded(score, 0, 120), 2), reasons, risks
+    return round(_bounded(score, 0, float(scoring.get("score_high", 120.0))), 2), reasons, risks
 
 
 def refresh_dragon_leader_daily(settings: Settings, trade_date: str | None = None) -> dict[str, Any]:
+    formula_spec = load_formula_spec(settings)
+    scoring = formula_section(formula_spec, "dragon_leader_scoring")
+    filter_cfg = formula_section(scoring, "candidate_filter")
+    levels = formula_section(scoring, "levels")
     date_value = _to_date(trade_date) if trade_date else None
     with connect() as conn, conn.cursor() as cur:
         if not date_value:
@@ -646,8 +659,8 @@ def refresh_dragon_leader_daily(settings: Settings, trade_date: str | None = Non
         theme_rows = [dict(row) for row in cur.fetchall()]
 
     cfg = settings.section("dragon_leader")
-    min_amount_yi = float(cfg.get("min_amount_yi", 20.0))
-    top_n = int(cfg.get("top_n", 300))
+    min_amount_yi = float(filter_cfg.get("min_amount_yi", cfg.get("min_amount_yi", 20.0)))
+    top_n = int(filter_cfg.get("top_n", cfg.get("top_n", 300)))
     themes = _theme_lookup(theme_rows)
     candidates: list[dict[str, Any]] = []
     now = datetime.now()
@@ -655,8 +668,8 @@ def refresh_dragon_leader_daily(settings: Settings, trade_date: str | None = Non
         if float(row.get("amount_yi") or 0) < min_amount_yi:
             continue
         matched = _matched_themes(row, themes)
-        score, reasons, risks = _leader_score(row, matched)
-        level = "strong" if score >= 88 else "watch" if score >= 68 else "candidate"
+        score, reasons, risks = _leader_score(row, matched, scoring)
+        level = "strong" if score >= float(levels.get("strong", 88.0)) else "watch" if score >= float(levels.get("watch", 68.0)) else "candidate"
         candidates.append(
             {
                 "trade_date": date_value,

@@ -2,9 +2,12 @@
 
 本文件说明 `technical_signal_system` 当前已经实现的结构化数据字段、技术指标、派生状态和评分口径。系统只输出结构化市场事实和技术信号，不写宏观解读、盘前影响判断或基本面研究结论。
 
+机器执行的公式和评分参数以 `config/indicator_formulas.json` 为准；本文件是给人看的说明。修改指标周期、阈值或权重时，应先改 JSON 清单，再同步更新本说明。
+
 ## 数据口径
 
 - 计算技术指标使用 `daily_bars.adj_open/adj_high/adj_low/adj_close`，也就是前复权价格。
+- 日常行情更新会刷新最近抓取窗口的前复权字段；遇到最新 `adj_factor` 变化的股票，会刷新该股票全历史前复权字段。
 - 展示价格和涨跌幅使用 Tushare 原始日线字段，如 `close`、`pct_chg`。
 - 成交量使用 `daily_bars.vol`，成交额使用 `daily_bars.amount`。Tushare 日线成交额单位为千元，系统在全 A 信号层换算为 `amount_yi = amount / 100000`。
 - 换手率使用 `daily_basic.turnover_rate`。
@@ -287,4 +290,3 @@ leader_score =
 - 资金流为正/负会小幅加减分
 
 这张表暂时主要服务技术日报，不作为全市场龙头排序主表。
-

@@ -8,6 +8,7 @@ import pandas as pd
 
 from .config import Settings
 from .db import connect, qname, upsert_rows
+from .formula_spec import formula_section, load_formula_spec, merged_signal_config
 from .indicators import add_indicators
 from .tushare_fetcher import TushareFetcher
 
@@ -781,43 +782,44 @@ def _volume_state(row: pd.Series, cfg: dict[str, Any]) -> str:
     return "量能正常"
 
 
-def _technical_score(row: pd.Series, cfg: dict[str, Any]) -> tuple[float, str, list[str], list[str]]:
-    score = 50.0
+def _technical_score(row: pd.Series, cfg: dict[str, Any], scoring: dict[str, Any] | None = None) -> tuple[float, str, list[str], list[str]]:
+    scoring = scoring or {}
+    score = float(scoring.get("base", 50.0))
     tags: list[str] = []
     risks: list[str] = []
     close = row.get("adj_close")
     ma5, ma10, ma20, ma60 = row.get("ma5"), row.get("ma10"), row.get("ma20"), row.get("ma60")
     if pd.notna(ma5) and pd.notna(ma10) and pd.notna(ma20):
         if ma5 > ma10 > ma20:
-            score += 18
+            score += float(scoring.get("bullish_alignment", 18.0))
             tags.append("多头排列")
         elif ma5 < ma10 < ma20:
-            score -= 22
+            score += float(scoring.get("bearish_alignment", -22.0))
             risks.append("空头排列")
     if pd.notna(close) and pd.notna(ma20):
         if close > ma20:
-            score += 8
+            score += float(scoring.get("above_ma20", 8.0))
             tags.append("站上MA20")
         else:
-            score -= 10
+            score += float(scoring.get("below_ma20", -10.0))
             risks.append("跌破MA20")
     if pd.notna(close) and pd.notna(ma60):
         if close > ma60:
-            score += 6
+            score += float(scoring.get("above_ma60", 6.0))
             tags.append("站上MA60")
         else:
-            score -= 5
+            score += float(scoring.get("below_ma60", -5.0))
     if pd.notna(row.get("macd_hist")):
         if row.get("macd_hist") > 0:
-            score += 7
+            score += float(scoring.get("macd_hist_positive", 7.0))
             tags.append("MACD偏强")
         else:
-            score -= 5
+            score += float(scoring.get("macd_hist_nonpositive", -5.0))
     if pd.notna(row.get("bias5")) and row.get("bias5") >= float(cfg.get("overheat_bias5", 8.0)):
-        score -= 14
+        score += float(scoring.get("overheat_bias_penalty", -14.0))
         risks.append("短线乖离过大")
     if pd.notna(row.get("rsi14")) and row.get("rsi14") >= float(cfg.get("high_rsi", 80.0)):
-        score -= 10
+        score += float(scoring.get("high_rsi_penalty", -10.0))
         risks.append("RSI过热")
     if "多头排列" in tags and pd.notna(row.get("high20")) and pd.notna(close) and close >= row.get("high20") * 0.995:
         phase = "breakout"
@@ -830,43 +832,53 @@ def _technical_score(row: pd.Series, cfg: dict[str, Any]) -> tuple[float, str, l
     return round(_bounded(score), 2), phase, tags, risks
 
 
-def _price_volume_score(row: pd.Series, amount_yi: float | None, volume_state: str) -> tuple[float, list[str], list[str]]:
-    score = 50.0
+def _price_volume_score(
+    row: pd.Series,
+    amount_yi: float | None,
+    volume_state: str,
+    scoring: dict[str, Any] | None = None,
+) -> tuple[float, list[str], list[str]]:
+    scoring = scoring or {}
+    score = float(scoring.get("base", 50.0))
     tags: list[str] = []
     risks: list[str] = []
     pct = _num(row.get("pct_chg")) or 0.0
     turnover = _num(row.get("turnover_rate")) or 0.0
     ratio = _num(row.get("volume_ratio_5")) or _num(row.get("volume_ratio")) or 0.0
-    score += max(min(pct, 20.0), -20.0) * 1.5
-    score += min(max(amount_yi or 0.0, 0.0), 120.0) * 0.16
-    score += min(max(turnover, 0.0), 30.0) * 0.55
-    score += min(max(ratio, 0.0), 8.0) * 2.0
+    pct_limit = float(scoring.get("pct_chg_limit", 20.0))
+    score += max(min(pct, pct_limit), -pct_limit) * float(scoring.get("pct_chg_weight", 1.5))
+    score += min(max(amount_yi or 0.0, 0.0), float(scoring.get("amount_yi_limit", 120.0))) * float(scoring.get("amount_yi_weight", 0.16))
+    score += min(max(turnover, 0.0), float(scoring.get("turnover_rate_limit", 30.0))) * float(scoring.get("turnover_rate_weight", 0.55))
+    score += min(max(ratio, 0.0), float(scoring.get("volume_ratio_limit", 8.0))) * float(scoring.get("volume_ratio_weight", 2.0))
     if volume_state == "放量上涨":
         tags.append("放量上涨")
-        score += 8
+        score += float(scoring.get("heavy_up_bonus", 8.0))
     elif volume_state == "放量下跌":
         risks.append("放量下跌")
-        score -= 10
+        score += float(scoring.get("heavy_down_penalty", -10.0))
     elif volume_state == "缩量回调":
         tags.append("缩量回调")
     elif volume_state == "缩量上涨":
         risks.append("缩量上涨")
-        score -= 4
+        score += float(scoring.get("shrink_up_penalty", -4.0))
     return round(_bounded(score), 2), tags, risks
 
 
-def _moneyflow_score(row: pd.Series) -> tuple[float, list[str], list[str]]:
+def _moneyflow_score(row: pd.Series, scoring: dict[str, Any] | None = None) -> tuple[float, list[str], list[str]]:
+    scoring = scoring or {}
     net_yi = _wan_to_yi(row.get("net_mf_amount"))
     rate = _num(row.get("net_mf_rate"))
     if net_yi is None and rate is None:
-        return 50.0, [], []
-    score = 50.0
+        return float(scoring.get("base", 50.0)), [], []
+    score = float(scoring.get("base", 50.0))
     tags: list[str] = []
     risks: list[str] = []
     if net_yi is not None:
-        score += max(min(net_yi, 8.0), -8.0) * 3.0
+        limit = float(scoring.get("net_mf_amount_yi_limit", 8.0))
+        score += max(min(net_yi, limit), -limit) * float(scoring.get("net_mf_amount_yi_weight", 3.0))
     if rate is not None:
-        score += max(min(rate, 12.0), -12.0) * 1.2
+        limit = float(scoring.get("net_mf_rate_limit", 12.0))
+        score += max(min(rate, limit), -limit) * float(scoring.get("net_mf_rate_weight", 1.2))
     if (net_yi or 0) > 0 or (rate or 0) > 0:
         tags.append("资金净流入")
     if (net_yi or 0) < 0 or (rate or 0) < 0:
@@ -874,38 +886,50 @@ def _moneyflow_score(row: pd.Series) -> tuple[float, list[str], list[str]]:
     return round(_bounded(score), 2), tags, risks
 
 
-def _limit_score(limit_row: dict[str, Any] | None) -> tuple[float, str, bool, bool, bool, list[str], list[str]]:
+def _limit_score(limit_row: dict[str, Any] | None, scoring: dict[str, Any] | None = None) -> tuple[float, str, bool, bool, bool, list[str], list[str]]:
+    scoring = scoring or {}
     if not limit_row:
-        return 50.0, "", False, False, False, [], []
+        return float(scoring.get("default", 50.0)), "", False, False, False, [], []
     limit_type = str(limit_row.get("limit_type") or "")
     limit_times = _num(limit_row.get("limit_times")) or 0.0
     open_times = _num(limit_row.get("open_times")) or 0.0
     tags: list[str] = []
     risks: list[str] = []
     if limit_type == "U":
-        score = 82.0 + min(limit_times, 5) * 3.0 - min(open_times, 5) * 2.0
+        score = (
+            float(scoring.get("limit_up_base", 82.0))
+            + min(limit_times, float(scoring.get("limit_times_limit", 5.0))) * float(scoring.get("limit_times_weight", 3.0))
+            + min(open_times, float(scoring.get("open_times_limit", 5.0))) * float(scoring.get("open_times_penalty", -2.0))
+        )
         tags.append("涨停")
         if limit_times >= 2:
             tags.append(f"{int(limit_times)}连板")
         return round(_bounded(score), 2), "limit_up", True, False, False, tags, risks
     if limit_type == "D":
         risks.append("跌停")
-        return 15.0, "limit_down", False, True, False, tags, risks
+        return float(scoring.get("limit_down", 15.0)), "limit_down", False, True, False, tags, risks
     if limit_type == "Z":
         risks.append("炸板")
-        return 42.0, "broken_board", False, False, True, tags, risks
-    return 50.0, "", False, False, False, tags, risks
+        return float(scoring.get("broken_board", 42.0)), "broken_board", False, False, True, tags, risks
+    return float(scoring.get("default", 50.0)), "", False, False, False, tags, risks
 
 
-def _lhb_score(lhb_row: dict[str, Any] | None) -> tuple[float, list[str], list[str]]:
+def _lhb_score(lhb_row: dict[str, Any] | None, scoring: dict[str, Any] | None = None) -> tuple[float, list[str], list[str]]:
+    scoring = scoring or {}
     if not lhb_row:
-        return 50.0, [], []
+        return float(scoring.get("default", 50.0)), [], []
     net = _num(lhb_row.get("lhb_net_buy_yi")) or 0.0
     inst = _num(lhb_row.get("institution_net_buy_yi")) or 0.0
     north = _num(lhb_row.get("northbound_net_buy_yi")) or 0.0
     amount_rate = _num(lhb_row.get("amount_rate")) or 0.0
-    score = 50.0 + max(min(net, 8.0), -8.0) * 2.2 + max(min(inst, 5.0), -5.0) * 3.0
-    score += max(min(north, 5.0), -5.0) * 2.0 + max(min(amount_rate, 30.0), 0.0) * 0.18
+    net_limit = float(scoring.get("net_buy_yi_limit", 8.0))
+    inst_limit = float(scoring.get("institution_net_buy_yi_limit", 5.0))
+    north_limit = float(scoring.get("northbound_net_buy_yi_limit", 5.0))
+    score = float(scoring.get("default", 50.0))
+    score += max(min(net, net_limit), -net_limit) * float(scoring.get("net_buy_yi_weight", 2.2))
+    score += max(min(inst, inst_limit), -inst_limit) * float(scoring.get("institution_net_buy_yi_weight", 3.0))
+    score += max(min(north, north_limit), -north_limit) * float(scoring.get("northbound_net_buy_yi_weight", 2.0))
+    score += max(min(amount_rate, float(scoring.get("amount_rate_limit", 30.0))), 0.0) * float(scoring.get("amount_rate_weight", 0.18))
     tags: list[str] = []
     risks: list[str] = []
     if net > 0:
@@ -920,6 +944,16 @@ def _lhb_score(lhb_row: dict[str, Any] | None) -> tuple[float, list[str], list[s
 
 
 def refresh_stock_signal_daily(settings: Settings, trade_date: str | None = None) -> dict[str, Any]:
+    formula_spec = load_formula_spec(settings)
+    cfg = merged_signal_config(settings, formula_spec)
+    scoring = formula_section(formula_spec, "stock_signal_scoring")
+    technical_scoring = formula_section(scoring, "technical")
+    price_volume_scoring = formula_section(scoring, "price_volume")
+    moneyflow_scoring = formula_section(scoring, "moneyflow")
+    limit_scoring = formula_section(scoring, "limit")
+    lhb_scoring = formula_section(scoring, "lhb")
+    total_weights = formula_section(scoring, "total_weights")
+    levels = formula_section(scoring, "levels")
     date_value = _to_date(trade_date) if trade_date else None
     with connect() as conn, conn.cursor() as cur:
         if date_value is None:
@@ -928,7 +962,7 @@ def refresh_stock_signal_daily(settings: Settings, trade_date: str | None = None
             date_value = str(row["d"]) if row and row["d"] else ""
         if not date_value:
             raise RuntimeError("No trade_date available for stock_signal_daily")
-        history_days = int(settings.section("signals").get("stock_signal_history_trading_days", 180))
+        history_days = int(cfg.get("stock_signal_history_trading_days", 180))
         history_start = _history_start_date(settings, date_value, history_days)
         history_filter = ""
         params: list[Any] = [date_value]
@@ -980,7 +1014,7 @@ def refresh_stock_signal_daily(settings: Settings, trade_date: str | None = None
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = add_indicators(df)
+    df = add_indicators(df, formula_spec)
     current = df[df["trade_date"].astype(str) == str(date_value)].copy()
     if current.empty:
         raise RuntimeError(f"No current daily bars for stock_signal_daily {date_value}")
@@ -995,7 +1029,6 @@ def refresh_stock_signal_daily(settings: Settings, trade_date: str | None = None
     lhb_by_code = {str(row.get("ts_code") or ""): row for row in lhb_rows}
     history_counts = df.groupby("ts_code")["trade_date"].count().to_dict()
     min_history = int(settings.section("signals").get("min_history_days", 60))
-    cfg = settings.section("signals")
 
     rows: list[dict[str, Any]] = []
     for _, row in current.iterrows():
@@ -1003,26 +1036,26 @@ def refresh_stock_signal_daily(settings: Settings, trade_date: str | None = None
         stock_meta = meta.get(ts_code, {})
         amount_yi = _thousand_yuan_to_yi(row.get("amount"))
         volume_state = _volume_state(row, cfg)
-        technical_score, trend_phase, tech_tags, tech_risks = _technical_score(row, cfg)
-        pv_score, pv_tags, pv_risks = _price_volume_score(row, amount_yi, volume_state)
-        mf_score, mf_tags, mf_risks = _moneyflow_score(row)
+        technical_score, trend_phase, tech_tags, tech_risks = _technical_score(row, cfg, technical_scoring)
+        pv_score, pv_tags, pv_risks = _price_volume_score(row, amount_yi, volume_state, price_volume_scoring)
+        mf_score, mf_tags, mf_risks = _moneyflow_score(row, moneyflow_scoring)
         limit_row = limit_by_code.get(ts_code)
         lhb_row = lhb_by_code.get(ts_code)
-        limit_score, limit_status, is_up, is_down, is_broken, limit_tags, limit_risks = _limit_score(limit_row)
-        lhb_score, lhb_tags, lhb_risks = _lhb_score(lhb_row)
+        limit_score, limit_status, is_up, is_down, is_broken, limit_tags, limit_risks = _limit_score(limit_row, limit_scoring)
+        lhb_score, lhb_tags, lhb_risks = _lhb_score(lhb_row, lhb_scoring)
         total = (
-            technical_score * 0.45
-            + pv_score * 0.25
-            + mf_score * 0.15
-            + limit_score * 0.10
-            + lhb_score * 0.05
+            technical_score * float(total_weights.get("technical_score", 0.45))
+            + pv_score * float(total_weights.get("price_volume_score", 0.25))
+            + mf_score * float(total_weights.get("moneyflow_score", 0.15))
+            + limit_score * float(total_weights.get("limit_score", 0.10))
+            + lhb_score * float(total_weights.get("lhb_score", 0.05))
         )
         total = round(_bounded(total), 2)
-        if total >= 78:
+        if total >= float(levels.get("strong", 78.0)):
             level = "strong"
-        elif total >= 62:
+        elif total >= float(levels.get("watch", 62.0)):
             level = "watch"
-        elif total <= 35:
+        elif total <= float(levels.get("risk", 35.0)):
             level = "risk"
         else:
             level = "neutral"
@@ -1141,6 +1174,13 @@ def refresh_stock_signal_daily(settings: Settings, trade_date: str | None = None
 
 
 def refresh_theme_signal_daily(settings: Settings, trade_date: str | None = None) -> dict[str, Any]:
+    formula_spec = load_formula_spec(settings)
+    scoring = formula_section(formula_spec, "theme_signal_scoring")
+    industry_heat_cfg = formula_section(scoring, "industry_heat")
+    industry_momentum_cfg = formula_section(scoring, "industry_momentum")
+    concept_heat_cfg = formula_section(scoring, "concept_heat")
+    concept_momentum_cfg = formula_section(scoring, "concept_momentum")
+    levels = formula_section(scoring, "levels")
     date_value = _to_date(trade_date) if trade_date else None
     if date_value is None:
         with connect() as conn, conn.cursor() as cur:
@@ -1207,8 +1247,22 @@ def refresh_theme_signal_daily(settings: Settings, trade_date: str | None = None
         strong_count = len(top_stocks_by_industry.get(theme, []))
         net = _num(row.get("net_amount_yi")) or 0.0
         pct = _num(row.get("pct_chg")) or 0.0
-        heat = _bounded(50.0 + max(min(net, 50), -50) * 0.8 + max(min(pct, 10), -10) * 2.0 + limit_up * 3.0 + strong_count * 2.0)
-        momentum = _bounded(50.0 + max(min(pct, 10), -10) * 3.0 + limit_up * 2.0 - broken * 1.5)
+        heat_net_limit = float(industry_heat_cfg.get("net_amount_yi_limit", 50.0))
+        heat_pct_limit = float(industry_heat_cfg.get("pct_chg_limit", 10.0))
+        momentum_pct_limit = float(industry_momentum_cfg.get("pct_chg_limit", 10.0))
+        heat = _bounded(
+            float(industry_heat_cfg.get("base", 50.0))
+            + max(min(net, heat_net_limit), -heat_net_limit) * float(industry_heat_cfg.get("net_amount_yi_weight", 0.8))
+            + max(min(pct, heat_pct_limit), -heat_pct_limit) * float(industry_heat_cfg.get("pct_chg_weight", 2.0))
+            + limit_up * float(industry_heat_cfg.get("limit_up_count_weight", 3.0))
+            + strong_count * float(industry_heat_cfg.get("strong_stock_count_weight", 2.0))
+        )
+        momentum = _bounded(
+            float(industry_momentum_cfg.get("base", 50.0))
+            + max(min(pct, momentum_pct_limit), -momentum_pct_limit) * float(industry_momentum_cfg.get("pct_chg_weight", 3.0))
+            + limit_up * float(industry_momentum_cfg.get("limit_up_count_weight", 2.0))
+            + broken * float(industry_momentum_cfg.get("broken_count_penalty", -1.5))
+        )
         rows.append(
             {
                 "trade_date": date_value,
@@ -1225,7 +1279,7 @@ def refresh_theme_signal_daily(settings: Settings, trade_date: str | None = None
                 "heat_score": round(heat, 2),
                 "momentum_score": round(momentum, 2),
                 "persistence_days": 1,
-                "signal_level": "strong" if heat >= 78 else "watch" if heat >= 62 else "risk" if heat <= 35 else "neutral",
+                "signal_level": "strong" if heat >= float(levels.get("strong", 78.0)) else "watch" if heat >= float(levels.get("watch", 62.0)) else "risk" if heat <= float(levels.get("risk", 35.0)) else "neutral",
                 "reason": f"行业资金净额{net:.2f}亿，涨停{limit_up}家，强个股{strong_count}只",
             }
         )
@@ -1236,7 +1290,18 @@ def refresh_theme_signal_daily(settings: Settings, trade_date: str | None = None
             continue
         net = _num(row.get("net_amount_yi")) or 0.0
         pct = _num(row.get("pct_chg")) or 0.0
-        heat = _bounded(50.0 + max(min(net, 50), -50) * 0.8 + max(min(pct, 10), -10) * 2.0)
+        heat_net_limit = float(concept_heat_cfg.get("net_amount_yi_limit", 50.0))
+        heat_pct_limit = float(concept_heat_cfg.get("pct_chg_limit", 10.0))
+        momentum_pct_limit = float(concept_momentum_cfg.get("pct_chg_limit", 10.0))
+        heat = _bounded(
+            float(concept_heat_cfg.get("base", 50.0))
+            + max(min(net, heat_net_limit), -heat_net_limit) * float(concept_heat_cfg.get("net_amount_yi_weight", 0.8))
+            + max(min(pct, heat_pct_limit), -heat_pct_limit) * float(concept_heat_cfg.get("pct_chg_weight", 2.0))
+        )
+        momentum = _bounded(
+            float(concept_momentum_cfg.get("base", 50.0))
+            + max(min(pct, momentum_pct_limit), -momentum_pct_limit) * float(concept_momentum_cfg.get("pct_chg_weight", 3.0))
+        )
         rows.append(
             {
                 "trade_date": date_value,
@@ -1251,9 +1316,9 @@ def refresh_theme_signal_daily(settings: Settings, trade_date: str | None = None
                 "top_stocks": _json([]),
                 "related_concepts": _json([]),
                 "heat_score": round(heat, 2),
-                "momentum_score": round(_bounded(50.0 + max(min(pct, 10), -10) * 3.0), 2),
+                "momentum_score": round(momentum, 2),
                 "persistence_days": 1,
-                "signal_level": "strong" if heat >= 78 else "watch" if heat >= 62 else "risk" if heat <= 35 else "neutral",
+                "signal_level": "strong" if heat >= float(levels.get("strong", 78.0)) else "watch" if heat >= float(levels.get("watch", 62.0)) else "risk" if heat <= float(levels.get("risk", 35.0)) else "neutral",
                 "reason": f"概念资金净额{net:.2f}亿，涨跌幅{pct:.2f}%",
             }
         )

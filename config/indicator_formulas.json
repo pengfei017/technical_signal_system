@@ -1,0 +1,192 @@
+{
+  "version": 1,
+  "history_window_trading_days": 180,
+  "technical_indicators": {
+    "moving_averages": {
+      "input": "adj_close",
+      "periods": [5, 10, 20, 60],
+      "method": "simple_moving_average"
+    },
+    "volume_averages": {
+      "input": "vol",
+      "periods": [5, 20],
+      "method": "simple_moving_average",
+      "previous_shift": 1
+    },
+    "high_low": {
+      "high_input": "adj_high",
+      "low_input": "adj_low",
+      "period": 20,
+      "method": "rolling_max_min"
+    },
+    "bias": {
+      "input": "adj_close",
+      "ma_period": 5,
+      "formula": "(adj_close / ma5 - 1) * 100"
+    },
+    "rsi": {
+      "input": "adj_close",
+      "period": 14,
+      "method": "simple_rolling_gain_loss"
+    },
+    "macd": {
+      "input": "adj_close",
+      "fast": 12,
+      "slow": 26,
+      "signal": 9,
+      "method": "ema",
+      "adjust": false
+    }
+  },
+  "thresholds": {
+    "heavy_volume_ratio": 1.5,
+    "shrink_volume_ratio": 0.7,
+    "breakout_volume_ratio": 1.3,
+    "pullback_volume_ratio": 0.9,
+    "overheat_bias5": 8.0,
+    "high_rsi": 80.0
+  },
+  "stock_signal_scoring": {
+    "technical": {
+      "base": 50.0,
+      "bullish_alignment": 18.0,
+      "bearish_alignment": -22.0,
+      "above_ma20": 8.0,
+      "below_ma20": -10.0,
+      "above_ma60": 6.0,
+      "below_ma60": -5.0,
+      "macd_hist_positive": 7.0,
+      "macd_hist_nonpositive": -5.0,
+      "overheat_bias_penalty": -14.0,
+      "high_rsi_penalty": -10.0
+    },
+    "price_volume": {
+      "base": 50.0,
+      "pct_chg_weight": 1.5,
+      "pct_chg_limit": 20.0,
+      "amount_yi_weight": 0.16,
+      "amount_yi_limit": 120.0,
+      "turnover_rate_weight": 0.55,
+      "turnover_rate_limit": 30.0,
+      "volume_ratio_weight": 2.0,
+      "volume_ratio_limit": 8.0,
+      "heavy_up_bonus": 8.0,
+      "heavy_down_penalty": -10.0,
+      "shrink_up_penalty": -4.0
+    },
+    "moneyflow": {
+      "base": 50.0,
+      "net_mf_amount_yi_weight": 3.0,
+      "net_mf_amount_yi_limit": 8.0,
+      "net_mf_rate_weight": 1.2,
+      "net_mf_rate_limit": 12.0
+    },
+    "limit": {
+      "default": 50.0,
+      "limit_up_base": 82.0,
+      "limit_times_weight": 3.0,
+      "limit_times_limit": 5.0,
+      "open_times_penalty": -2.0,
+      "open_times_limit": 5.0,
+      "limit_down": 15.0,
+      "broken_board": 42.0
+    },
+    "lhb": {
+      "default": 50.0,
+      "net_buy_yi_weight": 2.2,
+      "net_buy_yi_limit": 8.0,
+      "institution_net_buy_yi_weight": 3.0,
+      "institution_net_buy_yi_limit": 5.0,
+      "northbound_net_buy_yi_weight": 2.0,
+      "northbound_net_buy_yi_limit": 5.0,
+      "amount_rate_weight": 0.18,
+      "amount_rate_limit": 30.0
+    },
+    "total_weights": {
+      "technical_score": 0.45,
+      "price_volume_score": 0.25,
+      "moneyflow_score": 0.15,
+      "limit_score": 0.10,
+      "lhb_score": 0.05
+    },
+    "levels": {
+      "strong": 78.0,
+      "watch": 62.0,
+      "risk": 35.0
+    }
+  },
+  "theme_signal_scoring": {
+    "industry_heat": {
+      "base": 50.0,
+      "net_amount_yi_weight": 0.8,
+      "net_amount_yi_limit": 50.0,
+      "pct_chg_weight": 2.0,
+      "pct_chg_limit": 10.0,
+      "limit_up_count_weight": 3.0,
+      "strong_stock_count_weight": 2.0
+    },
+    "industry_momentum": {
+      "base": 50.0,
+      "pct_chg_weight": 3.0,
+      "pct_chg_limit": 10.0,
+      "limit_up_count_weight": 2.0,
+      "broken_count_penalty": -1.5
+    },
+    "concept_heat": {
+      "base": 50.0,
+      "net_amount_yi_weight": 0.8,
+      "net_amount_yi_limit": 50.0,
+      "pct_chg_weight": 2.0,
+      "pct_chg_limit": 10.0
+    },
+    "concept_momentum": {
+      "base": 50.0,
+      "pct_chg_weight": 3.0,
+      "pct_chg_limit": 10.0
+    },
+    "levels": {
+      "strong": 78.0,
+      "watch": 62.0,
+      "risk": 35.0
+    }
+  },
+  "dragon_leader_scoring": {
+    "candidate_filter": {
+      "min_amount_yi": 20.0,
+      "top_n": 300
+    },
+    "base": 35.0,
+    "pct_chg_weight": 1.6,
+    "pct_chg_limit": 20.0,
+    "amount_yi_weight": 0.08,
+    "amount_yi_limit": 300.0,
+    "turnover_rate_weight": 0.55,
+    "turnover_rate_limit": 30.0,
+    "volume_ratio_weight": 1.8,
+    "volume_ratio_limit": 8.0,
+    "total_signal_offset": 50.0,
+    "total_signal_weight": 0.35,
+    "total_signal_delta_low": -30.0,
+    "total_signal_delta_high": 40.0,
+    "limit_up_bonus": 16.0,
+    "limit_times_weight": 3.5,
+    "limit_times_limit": 5.0,
+    "broken_board_bonus": 3.0,
+    "lhb_net_buy_yi_weight": 1.4,
+    "lhb_net_buy_yi_limit": 10.0,
+    "institution_net_buy_yi_weight": 2.0,
+    "institution_net_buy_yi_limit": 5.0,
+    "northbound_net_buy_yi_weight": 1.6,
+    "northbound_net_buy_yi_limit": 5.0,
+    "theme_heat_base": 60.0,
+    "theme_heat_weight": 0.25,
+    "score_high": 120.0,
+    "levels": {
+      "strong": 88.0,
+      "watch": 68.0
+    },
+    "risk_thresholds": {
+      "high_turnover_rate": 25.0
+    }
+  }
+}

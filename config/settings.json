@@ -1,6 +1,7 @@
 {
   "output_root": "E:/technical_signals",
   "schema": "tech_signal",
+  "formula_spec_path": "indicator_formulas.json",
   "timezone": "Asia/Shanghai",
   "universe": {
     "include_watchlist": true,
