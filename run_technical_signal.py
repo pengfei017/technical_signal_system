@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -123,6 +124,19 @@ def _latest_daily_bar_trade_date(settings) -> str:
         return row["d"].strftime("%Y%m%d") if row and row["d"] else ""
 
 
+def _expected_latest_open_date(settings) -> str:
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT max(cal_date) AS d
+            FROM {qname(settings, 'trade_calendar')}
+            WHERE is_open=true AND cal_date <= CURRENT_DATE
+            """
+        )
+        row = cur.fetchone()
+        return row["d"].strftime("%Y%m%d") if row and row["d"] else ""
+
+
 def _dash_date(value: str | None) -> str | None:
     if not value:
         return None
@@ -130,6 +144,120 @@ def _dash_date(value: str | None) -> str | None:
     if len(text) == 8:
         return f"{text[:4]}-{text[4:6]}-{text[6:8]}"
     return value
+
+
+def _count_rows_for_date(cur, settings, table: str, trade_date: str, extra_where: str = "") -> int:
+    cur.execute(
+        f"SELECT count(*) AS n FROM {qname(settings, table)} WHERE trade_date=%s {extra_where}",
+        (trade_date,),
+    )
+    row = cur.fetchone()
+    return int(row["n"] or 0)
+
+
+def ensure_market_data_current(settings) -> dict[str, Any]:
+    expected = _expected_latest_open_date(settings)
+    latest = _latest_daily_bar_trade_date(settings)
+    if not expected or (latest and latest >= expected):
+        return {
+            "market_data_checked": True,
+            "market_data_refreshed": False,
+            "expected_trade_date": _dash_date(expected),
+            "latest_daily_bar_trade_date": _dash_date(latest),
+        }
+
+    logging.warning("daily market data is stale, refreshing before evening pipeline: latest=%s expected=%s", latest, expected)
+    refresh_metrics = update_market_data(settings)
+    refreshed_latest = _latest_daily_bar_trade_date(settings)
+    return {
+        "market_data_checked": True,
+        "market_data_refreshed": True,
+        "expected_trade_date": _dash_date(expected),
+        "previous_daily_bar_trade_date": _dash_date(latest),
+        "latest_daily_bar_trade_date": _dash_date(refreshed_latest),
+        **{f"market_refresh_{key}": value for key, value in refresh_metrics.items()},
+    }
+
+
+def validate_data_ready(
+    settings,
+    *,
+    trade_date: str | None = None,
+    require_trading: bool = True,
+    require_moneyflow: bool = True,
+    require_current_trade_date: bool = False,
+) -> dict[str, Any]:
+    validation_cfg = settings.section("validation")
+    data_cfg = settings.section("data")
+    date_value = _dash_date(trade_date)
+    if not date_value:
+        date_value = _dash_date(_latest_daily_bar_trade_date(settings))
+    if not date_value:
+        raise RuntimeError("Data validation failed: no daily_bars trade_date available")
+
+    expected = _dash_date(_expected_latest_open_date(settings))
+    counts: dict[str, int] = {}
+    with connect() as conn, conn.cursor() as cur:
+        counts["daily_bars"] = _count_rows_for_date(cur, settings, "daily_bars", date_value)
+        counts["daily_bars_with_adj"] = _count_rows_for_date(
+            cur,
+            settings,
+            "daily_bars",
+            date_value,
+            "AND adj_close IS NOT NULL",
+        )
+        counts["daily_basic"] = _count_rows_for_date(cur, settings, "daily_basic", date_value)
+        counts["moneyflow_daily"] = _count_rows_for_date(cur, settings, "moneyflow_daily", date_value)
+        counts["moneyflow_stock"] = _count_rows_for_date(cur, settings, "moneyflow_stock", date_value)
+        counts["limit_events"] = _count_rows_for_date(cur, settings, "limit_events", date_value)
+        counts["limit_market_stats"] = _count_rows_for_date(cur, settings, "limit_market_stats", date_value)
+        counts["lhb_stocks"] = _count_rows_for_date(cur, settings, "lhb_stocks", date_value)
+        counts["moneyflow_market"] = _count_rows_for_date(cur, settings, "moneyflow_market", date_value)
+        counts["moneyflow_industry"] = _count_rows_for_date(cur, settings, "moneyflow_industry", date_value)
+        counts["moneyflow_concept"] = _count_rows_for_date(cur, settings, "moneyflow_concept", date_value)
+
+    failures: list[str] = []
+
+    def require_count(key: str, min_count: int) -> None:
+        actual = int(counts.get(key, 0))
+        if actual < min_count:
+            failures.append(f"{key} rows {actual} < {min_count}")
+
+    if require_current_trade_date and expected and date_value != expected:
+        failures.append(f"daily_bars latest trade_date {date_value} != expected open date {expected}")
+
+    min_daily = int(validation_cfg.get("min_daily_bar_rows", 1000))
+    require_count("daily_bars", min_daily)
+    require_count("daily_bars_with_adj", min_daily)
+    require_count("daily_basic", int(validation_cfg.get("min_daily_basic_rows", 1000)))
+
+    if require_trading:
+        moneyflow_scope = str(data_cfg.get("moneyflow_scope", "all_market"))
+        if require_moneyflow and moneyflow_scope == "all_market":
+            min_moneyflow = int(validation_cfg.get("min_moneyflow_rows", 1000))
+            require_count("moneyflow_daily", min_moneyflow)
+            require_count("moneyflow_stock", int(validation_cfg.get("min_moneyflow_stock_rows", min_moneyflow)))
+
+        if bool(data_cfg.get("limit_lhb_enabled", True)) and bool(validation_cfg.get("require_limit_lhb", True)):
+            require_count("limit_events", int(validation_cfg.get("min_limit_events", 1)))
+            require_count("limit_market_stats", int(validation_cfg.get("min_limit_market_stats_rows", 1)))
+            require_count("lhb_stocks", int(validation_cfg.get("min_lhb_stocks", 1)))
+
+        if bool(data_cfg.get("market_moneyflow_enabled", True)) and bool(validation_cfg.get("require_market_moneyflow", True)):
+            require_count("moneyflow_market", int(validation_cfg.get("min_moneyflow_market_rows", 1)))
+            require_count("moneyflow_industry", int(validation_cfg.get("min_moneyflow_industry_rows", 1)))
+            require_count("moneyflow_concept", int(validation_cfg.get("min_moneyflow_concept_rows", 1)))
+
+    metrics: dict[str, Any] = {
+        "trade_date": date_value,
+        "expected_trade_date": expected,
+        "validation_status": "passed" if not failures else "failed",
+        **{f"validation_{key}_rows": value for key, value in counts.items()},
+    }
+    if failures:
+        metrics["validation_failures"] = failures
+        raise RuntimeError(f"Data validation failed for {date_value}: " + "; ".join(failures))
+    return metrics
 
 
 def update_market_data(settings, *, days: int | None = None) -> dict[str, Any]:
@@ -195,18 +323,38 @@ def update_data(settings, *, days: int | None = None, skip_moneyflow: bool = Fal
     return {**market_metrics, **trading_metrics}
 
 
-def process_signals(settings, *, trade_date: str | None = None) -> dict[str, Any]:
+def process_signals(
+    settings,
+    *,
+    trade_date: str | None = None,
+    require_trading: bool = True,
+    require_moneyflow: bool = True,
+    require_current_trade_date: bool = False,
+) -> dict[str, Any]:
+    validation_metrics = validate_data_ready(
+        settings,
+        trade_date=trade_date,
+        require_trading=require_trading,
+        require_moneyflow=require_moneyflow,
+        require_current_trade_date=require_current_trade_date,
+    )
     members = load_focus_universe(settings)
     sync_signal_universe(settings, members)
     signal_metrics = compute_signals(settings, trade_date=_dash_date(trade_date))
     report_path = generate_report(settings, trade_date=str(signal_metrics["trade_date"]))
-    return {**signal_metrics, "report_file": str(report_path)}
+    return {**validation_metrics, **signal_metrics, "report_file": str(report_path)}
 
 
 def evening_pipeline(settings, *, skip_moneyflow: bool = False) -> dict[str, Any]:
+    market_metrics = ensure_market_data_current(settings)
     trading_metrics = update_trading_data(settings, skip_moneyflow=skip_moneyflow)
-    process_metrics = process_signals(settings, trade_date=str(trading_metrics["trade_date"]))
-    return {**trading_metrics, **process_metrics}
+    process_metrics = process_signals(
+        settings,
+        trade_date=str(trading_metrics["trade_date"]),
+        require_moneyflow=not skip_moneyflow,
+        require_current_trade_date=True,
+    )
+    return {**market_metrics, **trading_metrics, **process_metrics}
 
 
 def run_all(settings, args) -> dict[str, Any]:
@@ -214,13 +362,87 @@ def run_all(settings, args) -> dict[str, Any]:
     calendar_metrics = update_calendar(settings)
     market_metrics = update_market_data(settings, days=args.days)
     trading_metrics = update_trading_data(settings, skip_moneyflow=args.skip_moneyflow)
-    process_metrics = process_signals(settings)
+    process_metrics = process_signals(
+        settings,
+        require_moneyflow=not args.skip_moneyflow,
+        require_current_trade_date=True,
+    )
     return {
         **calendar_metrics,
         **market_metrics,
         **trading_metrics,
         **process_metrics,
     }
+
+
+RETRYABLE_COMMANDS = {
+    "update-calendar",
+    "update-market-data",
+    "update-trading-data",
+    "update-data",
+    "evening-pipeline",
+    "run",
+}
+
+
+def execute_command(settings, args) -> dict[str, Any]:
+    if args.command == "update-calendar":
+        return update_calendar(settings)
+    if args.command == "update-market-data":
+        return update_market_data(settings, days=args.days)
+    if args.command == "update-trading-data":
+        return update_trading_data(settings, skip_moneyflow=args.skip_moneyflow)
+    if args.command == "update-data":
+        return update_data(settings, days=args.days, skip_moneyflow=args.skip_moneyflow)
+    if args.command == "validate-data":
+        return validate_data_ready(
+            settings,
+            trade_date=args.trade_date,
+            require_current_trade_date=args.trade_date is None,
+        )
+    if args.command == "analyze":
+        validation_metrics = validate_data_ready(
+            settings,
+            trade_date=args.trade_date,
+            require_current_trade_date=args.trade_date is None,
+        )
+        members = load_focus_universe(settings)
+        sync_signal_universe(settings, members)
+        signal_metrics = compute_signals(settings, trade_date=args.trade_date)
+        return {**validation_metrics, **signal_metrics}
+    if args.command == "report":
+        path = generate_report(settings, trade_date=args.trade_date)
+        return {"report_file": str(path)}
+    if args.command == "process":
+        return process_signals(
+            settings,
+            trade_date=args.trade_date,
+            require_current_trade_date=args.trade_date is None,
+        )
+    if args.command == "evening-pipeline":
+        return evening_pipeline(settings, skip_moneyflow=args.skip_moneyflow)
+    return run_all(settings, args)
+
+
+def execute_with_retries(settings, args) -> dict[str, Any]:
+    retry_cfg = settings.section("automation")
+    retry_count = int(retry_cfg.get("task_retry_count", 0)) if args.command in RETRYABLE_COMMANDS else 0
+    sleep_seconds = float(retry_cfg.get("task_retry_sleep_seconds", 0))
+    attempts = retry_count + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            metrics = execute_command(settings, args)
+            if attempts > 1:
+                metrics["task_attempt"] = attempt
+                metrics["task_max_attempts"] = attempts
+            return metrics
+        except Exception:
+            if attempt >= attempts:
+                raise
+            logging.exception("technical signal command failed, retrying: command=%s attempt=%s/%s", args.command, attempt, attempts)
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+    raise RuntimeError("unreachable retry state")
 
 
 def main() -> int:
@@ -233,6 +455,7 @@ def main() -> int:
             "update-market-data",
             "update-trading-data",
             "update-data",
+            "validate-data",
             "analyze",
             "report",
             "process",
@@ -264,27 +487,7 @@ def main() -> int:
             raise RuntimeError(f"Another technical_signal task is running: {lock_path}")
         init_schema(settings)
         run_id = start_run(settings, args.command)
-        if args.command == "update-calendar":
-            metrics = update_calendar(settings)
-        elif args.command == "update-market-data":
-            metrics = update_market_data(settings, days=args.days)
-        elif args.command == "update-trading-data":
-            metrics = update_trading_data(settings, skip_moneyflow=args.skip_moneyflow)
-        elif args.command == "update-data":
-            metrics = update_data(settings, days=args.days, skip_moneyflow=args.skip_moneyflow)
-        elif args.command == "analyze":
-            members = load_focus_universe(settings)
-            sync_signal_universe(settings, members)
-            metrics = compute_signals(settings, trade_date=args.trade_date)
-        elif args.command == "report":
-            path = generate_report(settings, trade_date=args.trade_date)
-            metrics = {"report_file": str(path)}
-        elif args.command == "process":
-            metrics = process_signals(settings, trade_date=args.trade_date)
-        elif args.command == "evening-pipeline":
-            metrics = evening_pipeline(settings, skip_moneyflow=args.skip_moneyflow)
-        else:
-            metrics = run_all(settings, args)
+        metrics = execute_with_retries(settings, args)
         finish_run(settings, run_id, "finished", metrics=metrics)
         print("agent_name=technical_signal")
         print("agent_status=finished")

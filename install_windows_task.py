@@ -16,7 +16,7 @@ TASKS = [
     {
         "name": "TechnicalSignalCalendarMonthly",
         "schedule": ["MONTHLY", "/D", "1"],
-        "time": "08:45",
+        "time": "05:00",
         "command": r'wscript.exe D:\technical_signal_system\run_technical_signal_hidden.vbs update-calendar',
     },
     {

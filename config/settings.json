@@ -24,6 +24,24 @@
     "limit_lhb_enabled": true,
     "market_moneyflow_enabled": true
   },
+  "automation": {
+    "task_retry_count": 2,
+    "task_retry_sleep_seconds": 1200
+  },
+  "validation": {
+    "min_daily_bar_rows": 1000,
+    "min_daily_basic_rows": 1000,
+    "min_moneyflow_rows": 1000,
+    "min_moneyflow_stock_rows": 1000,
+    "require_limit_lhb": true,
+    "min_limit_events": 1,
+    "min_limit_market_stats_rows": 1,
+    "min_lhb_stocks": 1,
+    "require_market_moneyflow": true,
+    "min_moneyflow_market_rows": 1,
+    "min_moneyflow_industry_rows": 1,
+    "min_moneyflow_concept_rows": 1
+  },
   "signals": {
     "mode": "mixed",
     "min_history_days": 60,

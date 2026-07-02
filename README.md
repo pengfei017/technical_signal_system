@@ -30,7 +30,7 @@
 - 成交量和成交额随日线入库；量能状态使用不含当日的前 5 日均量判断，放量突破/缩量回踩使用不含当日的前 20 日均量确认。
 - `stock_signal_daily` 每次从数据库已有全 A 历史重算，不局限于观察池/自选股范围。
 - 日报里的个股交易信号和龙虎榜确认暂时只展示 `signal_universe`，也就是自选股 + 观察池；全市场结果先保留在数据库里。
-- 涨停/炸板/跌停使用 Tushare `limit_list_d`，龙虎榜使用 `top_list` / `top_inst`，市场/行业/概念资金流使用 Tushare 对应资金流接口；这些辅助接口失败时记录 metrics，不阻断日线和技术信号。
+- 涨停/炸板/跌停使用 Tushare `limit_list_d`，龙虎榜使用 `top_list` / `top_inst`，市场/行业/概念资金流使用 Tushare 对应资金流接口；抓取阶段会记录失败细节，晚间处理和报告前会统一验数，验不过不出新报告。
 
 常用命令：
 
@@ -40,6 +40,7 @@ python run_technical_signal.py init-db
 python run_technical_signal.py update-calendar
 python run_technical_signal.py update-market-data
 python run_technical_signal.py update-trading-data
+python run_technical_signal.py validate-data
 python run_technical_signal.py process
 python run_technical_signal.py evening-pipeline
 python run_technical_signal.py run
@@ -48,15 +49,17 @@ python run_technical_signal.py report
 python install_windows_task.py
 ```
 
-说明：日常自动化使用拆分任务；`run` 保留为手动全流程；`--days` 用于首轮初始化或需要补历史数据时手动扩大抓取窗口。
+说明：日常自动化使用拆分任务；`run` 保留为手动全流程；`--days` 用于首轮初始化或需要补历史数据时手动扩大抓取窗口。Tushare 单接口失败会短重试，抓取/晚间流水线整条失败会等待 20 分钟重试，最多再试 2 次。
 
 定时任务：
 
 ```text
-TechnicalSignalCalendarMonthly      每月 1 日 08:45，更新交易日历。
+TechnicalSignalCalendarMonthly      每月 1 日 05:00，更新交易日历。
 TechnicalSignalMarketDataDaily      每天 17:20，更新全 A 日线、复权因子和 daily_basic。
 TechnicalSignalEveningPipelineDaily 每天 20:20，先更新全市场个股资金流、涨跌停/炸板、龙虎榜、行业/概念资金流，再串流执行分析和报告。
 ```
+
+晚间流水线会先检查全 A 日线是否已经到最新应开市交易日；如果 17:20 的日线任务失败或没有抓到当天数据，会先补跑一次 `update-market-data`。分析和报告前会校验当天日线、前复权字段、daily_basic、全市场个股资金流、涨跌停/炸板、龙虎榜、市场/行业/概念资金流是否入库；校验失败时任务记为 failed，等待任务级重试或下一个定时周期再跑。
 
 输出：
 
