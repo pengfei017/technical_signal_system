@@ -512,6 +512,7 @@ def execute_command(settings, args) -> dict[str, Any]:
             start_date=start_date,
             end_date=end_date,
             include_dragon_leaders=not args.skip_dragon_leaders,
+            force_dragon_signals=args.force_signals,
         )
     if args.command == "validate-data":
         return validate_data_ready(
@@ -601,6 +602,7 @@ def main() -> int:
     parser.add_argument("--date", default=None, help="Alias of --trade-date; use 最近交易日 or latest for default latest")
     parser.add_argument("--skip-moneyflow", action="store_true")
     parser.add_argument("--skip-dragon-leaders", action="store_true")
+    parser.add_argument("--force-signals", action="store_true", help="Regenerate stock/theme signal layers during market-layer backfill")
     args = parser.parse_args()
     if args.date and not args.trade_date:
         args.trade_date = args.date

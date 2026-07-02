@@ -738,6 +738,7 @@ def refresh_dragon_leader_daily_range(
     end_date: str,
     *,
     generate_missing_signals: bool = True,
+    force_regenerate_signals: bool = False,
 ) -> dict[str, Any]:
     start = _date_text(start_date)
     end = _date_text(end_date)
@@ -766,7 +767,8 @@ def refresh_dragon_leader_daily_range(
             skipped_no_bars.append(date_value)
             continue
         try:
-            if generate_missing_signals and _stock_signal_count(settings, trade_date) == 0:
+            stock_signal_count = _stock_signal_count(settings, trade_date)
+            if generate_missing_signals and (force_regenerate_signals or stock_signal_count == 0):
                 assert refresh_final_signal_layers is not None
                 refresh_final_signal_layers(settings, trade_date)
                 generated_signal_dates += 1
@@ -813,10 +815,16 @@ def backfill_market_structure_layers(
     end_date: str,
     *,
     include_dragon_leaders: bool = True,
+    force_dragon_signals: bool = False,
 ) -> dict[str, Any]:
     index_metrics = refresh_index_daily_range(settings, start_date, end_date)
     global_metrics = refresh_global_index_daily_range(settings, start_date, end_date)
     dragon_metrics: dict[str, Any] = {}
     if include_dragon_leaders:
-        dragon_metrics = refresh_dragon_leader_daily_range(settings, start_date, end_date)
+        dragon_metrics = refresh_dragon_leader_daily_range(
+            settings,
+            start_date,
+            end_date,
+            force_regenerate_signals=force_dragon_signals,
+        )
     return {**index_metrics, **global_metrics, **dragon_metrics}
