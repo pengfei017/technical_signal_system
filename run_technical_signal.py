@@ -30,6 +30,7 @@ from tech_signal.trading_signals import (
     fetch_limit_events,
     fetch_moneyflow_layers,
     refresh_stock_signal_daily,
+    refresh_stock_signal_daily_range,
     refresh_theme_signal_daily,
     sync_moneyflow_stock_from_daily,
     update_trading_auxiliary,
@@ -644,6 +645,79 @@ def backfill_signal_layers(
     return totals
 
 
+def _stock_signal_counts_for_date(settings, trade_date: str) -> dict[str, int]:
+    date_value = _dash_date(trade_date)
+    with connect() as conn, conn.cursor() as cur:
+        return {
+            "daily_bars": _count_rows_for_date(cur, settings, "daily_bars", str(date_value), "AND adj_close IS NOT NULL"),
+            "stock_signal_daily": _count_rows_for_date(cur, settings, "stock_signal_daily", str(date_value)),
+        }
+
+
+def backfill_stock_signals(
+    settings,
+    *,
+    start_date: str,
+    end_date: str,
+    force: bool = False,
+) -> dict[str, Any]:
+    start_compact = _compact_date(start_date)
+    end_compact = _compact_date(end_date)
+    if not start_compact or not end_compact:
+        raise RuntimeError(f"Invalid stock-signal backfill date range: {start_date} to {end_date}")
+    dates = _open_trade_dates_between(settings, start_date=start_compact, end_date=end_compact)
+    if not dates:
+        raise RuntimeError(f"No open trade dates found for {start_compact}-{end_compact}")
+
+    warnings: list[str] = []
+    totals: dict[str, Any] = {
+        "stock_signal_backfill_start_date": _dash_date(start_compact),
+        "stock_signal_backfill_end_date": _dash_date(end_compact),
+        "stock_signal_target_dates": len(dates),
+        "stock_signal_force": force,
+        "stock_signal_skipped_complete_dates": 0,
+        "stock_signal_skipped_no_bars": 0,
+        "stock_signal_refreshed_dates": 0,
+        "stock_signal_expected_rows": 0,
+        "stock_signal_daily_rows": 0,
+    }
+
+    chunks: list[tuple[str, str]] = []
+    chunk_start = dates[0]
+    previous = dates[0]
+    chunk_year = dates[0][:4]
+    for trade_date in dates[1:]:
+        if trade_date[:4] != chunk_year:
+            chunks.append((chunk_start, previous))
+            chunk_start = trade_date
+            chunk_year = trade_date[:4]
+        previous = trade_date
+    chunks.append((chunk_start, previous))
+
+    for index, (chunk_start_date, chunk_end_date) in enumerate(chunks, start=1):
+        try:
+            logging.info("stock-signal range backfill %s/%s %s to %s start", index, len(chunks), _dash_date(chunk_start_date), _dash_date(chunk_end_date))
+            metrics = refresh_stock_signal_daily_range(
+                settings,
+                str(_dash_date(chunk_start_date)),
+                str(_dash_date(chunk_end_date)),
+                force=force,
+            )
+            totals["stock_signal_skipped_complete_dates"] += int(metrics.get("stock_signal_skipped_complete_dates", 0) or 0)
+            totals["stock_signal_skipped_no_bars"] += int(metrics.get("stock_signal_skipped_no_bars", 0) or 0)
+            totals["stock_signal_refreshed_dates"] += int(metrics.get("stock_signal_refreshed_dates", 0) or 0)
+            totals["stock_signal_expected_rows"] += int(metrics.get("stock_signal_expected_rows", 0) or 0)
+            totals["stock_signal_daily_rows"] += int(metrics.get("stock_signal_daily_rows", 0) or 0)
+            logging.info("stock-signal range backfill %s/%s %s to %s done metrics=%s", index, len(chunks), _dash_date(chunk_start_date), _dash_date(chunk_end_date), metrics)
+        except Exception as exc:
+            warnings.append(f"{_dash_date(chunk_start_date)} to {_dash_date(chunk_end_date)}: {type(exc).__name__}: {exc}")
+            logging.exception("stock-signal range backfill failed for %s to %s", _dash_date(chunk_start_date), _dash_date(chunk_end_date))
+
+    totals["stock_signal_warning_count"] = len(warnings)
+    totals["stock_signal_warning_samples"] = warnings[:20]
+    return totals
+
+
 def update_data(settings, *, days: int | None = None, skip_moneyflow: bool = False) -> dict[str, Any]:
     market_metrics = update_market_data(settings, days=days)
     trading_metrics = update_trading_data(settings, skip_moneyflow=skip_moneyflow)
@@ -714,6 +788,7 @@ RETRYABLE_COMMANDS = {
     "backfill-trading-data",
     "backfill-market-layers",
     "backfill-signal-layers",
+    "backfill-stock-signals",
     "refresh-dragon-leaders",
     "evening-pipeline",
     "run",
@@ -810,6 +885,21 @@ def execute_command(settings, args) -> dict[str, Any]:
             end_date=end_date,
             force=args.force,
         )
+    if args.command == "backfill-stock-signals":
+        if args.year:
+            start_date = args.start_date or f"{args.year}0101"
+            end_date = args.end_date or f"{args.year}1231"
+        else:
+            start_date = args.start_date
+            end_date = args.end_date
+        if not start_date or not end_date:
+            raise RuntimeError("backfill-stock-signals requires --year or both --start-date and --end-date")
+        return backfill_stock_signals(
+            settings,
+            start_date=start_date,
+            end_date=end_date,
+            force=args.force,
+        )
     if args.command == "validate-data":
         return validate_data_ready(
             settings,
@@ -881,6 +971,7 @@ def main() -> int:
             "backfill-trading-data",
             "backfill-market-layers",
             "backfill-signal-layers",
+            "backfill-stock-signals",
             "validate-data",
             "analyze",
             "report",

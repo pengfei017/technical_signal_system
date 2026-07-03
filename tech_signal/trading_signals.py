@@ -950,8 +950,74 @@ def _lhb_score(lhb_row: dict[str, Any] | None, scoring: dict[str, Any] | None = 
     return round(_bounded(score), 2), tags, risks
 
 
-def refresh_stock_signal_daily(settings: Settings, trade_date: str | None = None) -> dict[str, Any]:
-    formula_spec = load_formula_spec(settings)
+def _stock_signal_columns() -> list[str]:
+    return [
+        "trade_date",
+        "ts_code",
+        "name",
+        "industry",
+        "concepts",
+        "close",
+        "pct_chg",
+        "amount_yi",
+        "turnover_rate",
+        "ma5",
+        "ma10",
+        "ma20",
+        "ma60",
+        "bias5",
+        "rsi14",
+        "macd",
+        "macd_signal",
+        "macd_hist",
+        "vol_ma5",
+        "vol_ma20",
+        "prev_vol_ma5",
+        "prev_vol_ma20",
+        "volume_ratio_5",
+        "volume_ratio_20",
+        "high20",
+        "low20",
+        "volume_ratio",
+        "technical_score",
+        "price_volume_score",
+        "moneyflow_score",
+        "limit_score",
+        "lhb_score",
+        "total_signal_score",
+        "signal_level",
+        "trend_phase",
+        "volume_state",
+        "limit_status",
+        "is_limit_up",
+        "is_limit_down",
+        "is_broken_board",
+        "limit_times",
+        "open_times",
+        "first_limit_time",
+        "last_limit_time",
+        "net_mf_amount",
+        "net_mf_amount_yi",
+        "net_mf_rate",
+        "lhb_net_buy_yi",
+        "institution_net_buy_yi",
+        "northbound_net_buy_yi",
+        "lhb_reason",
+        "tags",
+        "risk_flags",
+        "reason",
+        "data_quality",
+    ]
+
+
+def _build_stock_signal_rows(
+    settings: Settings,
+    df: pd.DataFrame,
+    current: pd.DataFrame,
+    limit_rows: list[dict[str, Any]],
+    lhb_rows: list[dict[str, Any]],
+    formula_spec: dict[str, Any],
+) -> list[dict[str, Any]]:
     cfg = merged_signal_config(settings, formula_spec)
     scoring = formula_section(formula_spec, "stock_signal_scoring")
     technical_scoring = formula_section(scoring, "technical")
@@ -961,6 +1027,140 @@ def refresh_stock_signal_daily(settings: Settings, trade_date: str | None = None
     lhb_scoring = formula_section(scoring, "lhb")
     total_weights = formula_section(scoring, "total_weights")
     levels = formula_section(scoring, "levels")
+    meta = _stock_meta()
+    limit_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in limit_rows:
+        key = (str(item.get("trade_date")), str(item.get("ts_code") or ""))
+        existing = limit_by_key.get(key)
+        if not existing or str(item.get("limit_type")) == "U":
+            limit_by_key[key] = item
+    lhb_by_key = {(str(item.get("trade_date")), str(item.get("ts_code") or "")): item for item in lhb_rows}
+    history_frame = df[["trade_date", "ts_code"]].copy()
+    history_frame["trade_date_key"] = history_frame["trade_date"].astype(str)
+    history_frame["ts_code_key"] = history_frame["ts_code"].astype(str)
+    history_frame = history_frame.sort_values(["ts_code_key", "trade_date_key"])
+    history_frame["history_days"] = history_frame.groupby("ts_code_key").cumcount() + 1
+    history_counts = dict(
+        zip(
+            zip(history_frame["trade_date_key"], history_frame["ts_code_key"]),
+            history_frame["history_days"].astype(int),
+        )
+    )
+    min_history = int(settings.section("signals").get("min_history_days", 60))
+
+    rows: list[dict[str, Any]] = []
+    for _, row in current.iterrows():
+        ts_code = str(row.get("ts_code") or "")
+        date_value = str(row.get("trade_date"))
+        stock_meta = meta.get(ts_code, {})
+        amount_yi = _thousand_yuan_to_yi(row.get("amount"))
+        volume_state = _volume_state(row, cfg)
+        technical_score, trend_phase, tech_tags, tech_risks = _technical_score(row, cfg, technical_scoring)
+        pv_score, pv_tags, pv_risks = _price_volume_score(row, amount_yi, volume_state, price_volume_scoring)
+        mf_score, mf_tags, mf_risks = _moneyflow_score(row, moneyflow_scoring)
+        limit_row = limit_by_key.get((date_value, ts_code))
+        lhb_row = lhb_by_key.get((date_value, ts_code))
+        limit_score, limit_status, is_up, is_down, is_broken, limit_tags, limit_risks = _limit_score(limit_row, limit_scoring)
+        lhb_score, lhb_tags, lhb_risks = _lhb_score(lhb_row, lhb_scoring)
+        total = (
+            technical_score * float(total_weights.get("technical_score", 0.45))
+            + pv_score * float(total_weights.get("price_volume_score", 0.25))
+            + mf_score * float(total_weights.get("moneyflow_score", 0.15))
+            + limit_score * float(total_weights.get("limit_score", 0.10))
+            + lhb_score * float(total_weights.get("lhb_score", 0.05))
+        )
+        total = round(_bounded(total), 2)
+        if total >= float(levels.get("strong", 78.0)):
+            level = "strong"
+        elif total >= float(levels.get("watch", 62.0)):
+            level = "watch"
+        elif total <= float(levels.get("risk", 35.0)):
+            level = "risk"
+        else:
+            level = "neutral"
+        tags = list(dict.fromkeys([*tech_tags, *pv_tags, *mf_tags, *limit_tags, *lhb_tags]))
+        risks = list(dict.fromkeys([*tech_risks, *pv_risks, *mf_risks, *limit_risks, *lhb_risks]))
+        reason_parts = []
+        if tags:
+            reason_parts.append("、".join(tags[:5]))
+        if risks:
+            reason_parts.append("风险：" + "、".join(risks[:4]))
+        if not reason_parts:
+            reason_parts.append("个股交易信号暂不突出")
+        history_days = int(history_counts.get((date_value, ts_code), 0))
+        data_quality = {
+            "history_days": history_days,
+            "enough_history": history_days >= min_history,
+            "has_moneyflow": pd.notna(row.get("net_mf_amount")),
+            "has_limit_event": bool(limit_row),
+            "has_lhb": bool(lhb_row),
+            "scope": "all_a",
+        }
+        rows.append(
+            {
+                "trade_date": date_value,
+                "ts_code": ts_code,
+                "name": stock_meta.get("name") or ts_code,
+                "industry": stock_meta.get("industry"),
+                "concepts": stock_meta.get("concepts"),
+                "close": _clean(row.get("close")),
+                "pct_chg": _clean(row.get("pct_chg")),
+                "amount_yi": amount_yi,
+                "turnover_rate": _clean(row.get("turnover_rate")),
+                "ma5": _clean(row.get("ma5")),
+                "ma10": _clean(row.get("ma10")),
+                "ma20": _clean(row.get("ma20")),
+                "ma60": _clean(row.get("ma60")),
+                "bias5": _clean(row.get("bias5")),
+                "rsi14": _clean(row.get("rsi14")),
+                "macd": _clean(row.get("macd")),
+                "macd_signal": _clean(row.get("macd_signal")),
+                "macd_hist": _clean(row.get("macd_hist")),
+                "vol_ma5": _clean(row.get("vol_ma5")),
+                "vol_ma20": _clean(row.get("vol_ma20")),
+                "prev_vol_ma5": _clean(row.get("prev_vol_ma5")),
+                "prev_vol_ma20": _clean(row.get("prev_vol_ma20")),
+                "volume_ratio_5": _clean(row.get("volume_ratio_5")),
+                "volume_ratio_20": _clean(row.get("volume_ratio_20")),
+                "high20": _clean(row.get("high20")),
+                "low20": _clean(row.get("low20")),
+                "volume_ratio": _clean(row.get("volume_ratio_5")),
+                "technical_score": technical_score,
+                "price_volume_score": pv_score,
+                "moneyflow_score": mf_score,
+                "limit_score": limit_score,
+                "lhb_score": lhb_score,
+                "total_signal_score": total,
+                "signal_level": level,
+                "trend_phase": trend_phase,
+                "volume_state": volume_state,
+                "limit_status": limit_status,
+                "is_limit_up": is_up,
+                "is_limit_down": is_down,
+                "is_broken_board": is_broken,
+                "limit_times": _clean(limit_row.get("limit_times")) if limit_row else None,
+                "open_times": _clean(limit_row.get("open_times")) if limit_row else None,
+                "first_limit_time": limit_row.get("first_limit_time") if limit_row else "",
+                "last_limit_time": limit_row.get("last_limit_time") if limit_row else "",
+                "net_mf_amount": _clean(row.get("net_mf_amount")),
+                "net_mf_amount_yi": _wan_to_yi(row.get("net_mf_amount")),
+                "net_mf_rate": _clean(row.get("net_mf_rate")),
+                "lhb_net_buy_yi": _clean(lhb_row.get("lhb_net_buy_yi")) if lhb_row else None,
+                "institution_net_buy_yi": _clean(lhb_row.get("institution_net_buy_yi")) if lhb_row else None,
+                "northbound_net_buy_yi": _clean(lhb_row.get("northbound_net_buy_yi")) if lhb_row else None,
+                "lhb_reason": lhb_row.get("primary_reason") if lhb_row else "",
+                "tags": _json(tags),
+                "risk_flags": _json(risks),
+                "reason": "；".join(reason_parts),
+                "data_quality": _json(data_quality),
+            }
+        )
+    return rows
+
+
+def refresh_stock_signal_daily(settings: Settings, trade_date: str | None = None) -> dict[str, Any]:
+    formula_spec = load_formula_spec(settings)
+    cfg = merged_signal_config(settings, formula_spec)
     date_value = _to_date(trade_date) if trade_date else None
     with connect() as conn, conn.cursor() as cur:
         if date_value is None:
@@ -1026,146 +1226,8 @@ def refresh_stock_signal_daily(settings: Settings, trade_date: str | None = None
     if current.empty:
         raise RuntimeError(f"No current daily bars for stock_signal_daily {date_value}")
 
-    meta = _stock_meta()
-    limit_by_code: dict[str, dict[str, Any]] = {}
-    for row in limit_rows:
-        code = str(row.get("ts_code") or "")
-        existing = limit_by_code.get(code)
-        if not existing or str(row.get("limit_type")) == "U":
-            limit_by_code[code] = row
-    lhb_by_code = {str(row.get("ts_code") or ""): row for row in lhb_rows}
-    history_counts = df.groupby("ts_code")["trade_date"].count().to_dict()
-    min_history = int(settings.section("signals").get("min_history_days", 60))
-
-    rows: list[dict[str, Any]] = []
-    for _, row in current.iterrows():
-        ts_code = str(row.get("ts_code") or "")
-        stock_meta = meta.get(ts_code, {})
-        amount_yi = _thousand_yuan_to_yi(row.get("amount"))
-        volume_state = _volume_state(row, cfg)
-        technical_score, trend_phase, tech_tags, tech_risks = _technical_score(row, cfg, technical_scoring)
-        pv_score, pv_tags, pv_risks = _price_volume_score(row, amount_yi, volume_state, price_volume_scoring)
-        mf_score, mf_tags, mf_risks = _moneyflow_score(row, moneyflow_scoring)
-        limit_row = limit_by_code.get(ts_code)
-        lhb_row = lhb_by_code.get(ts_code)
-        limit_score, limit_status, is_up, is_down, is_broken, limit_tags, limit_risks = _limit_score(limit_row, limit_scoring)
-        lhb_score, lhb_tags, lhb_risks = _lhb_score(lhb_row, lhb_scoring)
-        total = (
-            technical_score * float(total_weights.get("technical_score", 0.45))
-            + pv_score * float(total_weights.get("price_volume_score", 0.25))
-            + mf_score * float(total_weights.get("moneyflow_score", 0.15))
-            + limit_score * float(total_weights.get("limit_score", 0.10))
-            + lhb_score * float(total_weights.get("lhb_score", 0.05))
-        )
-        total = round(_bounded(total), 2)
-        if total >= float(levels.get("strong", 78.0)):
-            level = "strong"
-        elif total >= float(levels.get("watch", 62.0)):
-            level = "watch"
-        elif total <= float(levels.get("risk", 35.0)):
-            level = "risk"
-        else:
-            level = "neutral"
-        tags = list(dict.fromkeys([*tech_tags, *pv_tags, *mf_tags, *limit_tags, *lhb_tags]))
-        risks = list(dict.fromkeys([*tech_risks, *pv_risks, *mf_risks, *limit_risks, *lhb_risks]))
-        reason_parts = []
-        if tags:
-            reason_parts.append("、".join(tags[:5]))
-        if risks:
-            reason_parts.append("风险：" + "、".join(risks[:4]))
-        if not reason_parts:
-            reason_parts.append("个股交易信号暂不突出")
-        data_quality = {
-            "history_days": int(history_counts.get(ts_code, 0)),
-            "enough_history": int(history_counts.get(ts_code, 0)) >= min_history,
-            "has_moneyflow": pd.notna(row.get("net_mf_amount")),
-            "has_limit_event": bool(limit_row),
-            "has_lhb": bool(lhb_row),
-            "scope": "all_a",
-        }
-        rows.append(
-            {
-                "trade_date": date_value,
-                "ts_code": ts_code,
-                "name": stock_meta.get("name") or ts_code,
-                "industry": stock_meta.get("industry"),
-                "concepts": stock_meta.get("concepts"),
-                "close": _clean(row.get("close")),
-                "pct_chg": _clean(row.get("pct_chg")),
-                "amount_yi": amount_yi,
-                "turnover_rate": _clean(row.get("turnover_rate")),
-                "volume_ratio": _clean(row.get("volume_ratio_5")),
-                "technical_score": technical_score,
-                "price_volume_score": pv_score,
-                "moneyflow_score": mf_score,
-                "limit_score": limit_score,
-                "lhb_score": lhb_score,
-                "total_signal_score": total,
-                "signal_level": level,
-                "trend_phase": trend_phase,
-                "volume_state": volume_state,
-                "limit_status": limit_status,
-                "is_limit_up": is_up,
-                "is_limit_down": is_down,
-                "is_broken_board": is_broken,
-                "limit_times": _clean(limit_row.get("limit_times")) if limit_row else None,
-                "open_times": _clean(limit_row.get("open_times")) if limit_row else None,
-                "first_limit_time": limit_row.get("first_limit_time") if limit_row else "",
-                "last_limit_time": limit_row.get("last_limit_time") if limit_row else "",
-                "net_mf_amount": _clean(row.get("net_mf_amount")),
-                "net_mf_amount_yi": _wan_to_yi(row.get("net_mf_amount")),
-                "net_mf_rate": _clean(row.get("net_mf_rate")),
-                "lhb_net_buy_yi": _clean(lhb_row.get("lhb_net_buy_yi")) if lhb_row else None,
-                "institution_net_buy_yi": _clean(lhb_row.get("institution_net_buy_yi")) if lhb_row else None,
-                "northbound_net_buy_yi": _clean(lhb_row.get("northbound_net_buy_yi")) if lhb_row else None,
-                "lhb_reason": lhb_row.get("primary_reason") if lhb_row else "",
-                "tags": _json(tags),
-                "risk_flags": _json(risks),
-                "reason": "；".join(reason_parts),
-                "data_quality": _json(data_quality),
-            }
-        )
-
-    columns = [
-        "trade_date",
-        "ts_code",
-        "name",
-        "industry",
-        "concepts",
-        "close",
-        "pct_chg",
-        "amount_yi",
-        "turnover_rate",
-        "volume_ratio",
-        "technical_score",
-        "price_volume_score",
-        "moneyflow_score",
-        "limit_score",
-        "lhb_score",
-        "total_signal_score",
-        "signal_level",
-        "trend_phase",
-        "volume_state",
-        "limit_status",
-        "is_limit_up",
-        "is_limit_down",
-        "is_broken_board",
-        "limit_times",
-        "open_times",
-        "first_limit_time",
-        "last_limit_time",
-        "net_mf_amount",
-        "net_mf_amount_yi",
-        "net_mf_rate",
-        "lhb_net_buy_yi",
-        "institution_net_buy_yi",
-        "northbound_net_buy_yi",
-        "lhb_reason",
-        "tags",
-        "risk_flags",
-        "reason",
-        "data_quality",
-    ]
+    rows = _build_stock_signal_rows(settings, df, current, limit_rows, lhb_rows, formula_spec)
+    columns = _stock_signal_columns()
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute(f"DELETE FROM {qname(settings, 'stock_signal_daily')} WHERE trade_date=%s", (date_value,))
@@ -1178,6 +1240,168 @@ def refresh_stock_signal_daily(settings: Settings, trade_date: str | None = None
         )
         conn.commit()
     return {"stock_signal_daily_rows": count, "stock_signal_trade_date": date_value}
+
+
+def refresh_stock_signal_daily_range(
+    settings: Settings,
+    start_date: str,
+    end_date: str,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    start_value = _to_date(start_date)
+    end_value = _to_date(end_date)
+    if not start_value or not end_value or start_value > end_value:
+        raise RuntimeError(f"Invalid stock_signal_daily range: {start_date} to {end_date}")
+
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            WITH target_dates AS (
+                SELECT cal_date AS trade_date
+                FROM {qname(settings, 'trade_calendar')}
+                WHERE is_open=true AND cal_date BETWEEN %s AND %s
+            ),
+            daily_counts AS (
+                SELECT trade_date, count(*) AS n
+                FROM {qname(settings, 'daily_bars')}
+                WHERE trade_date BETWEEN %s AND %s AND adj_close IS NOT NULL
+                GROUP BY trade_date
+            ),
+            signal_counts AS (
+                SELECT trade_date, count(*) AS n
+                FROM {qname(settings, 'stock_signal_daily')}
+                WHERE trade_date BETWEEN %s AND %s
+                GROUP BY trade_date
+            )
+            SELECT d.trade_date,
+                   coalesce(dc.n, 0) AS daily_rows,
+                   coalesce(sc.n, 0) AS signal_rows
+            FROM target_dates d
+            LEFT JOIN daily_counts dc ON dc.trade_date=d.trade_date
+            LEFT JOIN signal_counts sc ON sc.trade_date=d.trade_date
+            ORDER BY d.trade_date
+            """,
+            (start_value, end_value, start_value, end_value, start_value, end_value),
+        )
+        date_rows = [dict(row) for row in cur.fetchall()]
+
+    target_dates: list[str] = []
+    skipped_complete = 0
+    skipped_no_bars = 0
+    expected_rows = 0
+    for row in date_rows:
+        date_text = str(row["trade_date"])
+        daily_rows = int(row.get("daily_rows") or 0)
+        signal_rows = int(row.get("signal_rows") or 0)
+        if daily_rows <= 0:
+            skipped_no_bars += 1
+            continue
+        if not force and signal_rows >= daily_rows:
+            skipped_complete += 1
+            continue
+        target_dates.append(date_text)
+        expected_rows += daily_rows
+
+    if not target_dates:
+        return {
+            "stock_signal_range_start": start_value,
+            "stock_signal_range_end": end_value,
+            "stock_signal_target_dates": len(date_rows),
+            "stock_signal_refreshed_dates": 0,
+            "stock_signal_skipped_complete_dates": skipped_complete,
+            "stock_signal_skipped_no_bars": skipped_no_bars,
+            "stock_signal_daily_rows": 0,
+        }
+
+    formula_spec = load_formula_spec(settings)
+    cfg = merged_signal_config(settings, formula_spec)
+    history_days = int(cfg.get("stock_signal_history_trading_days", 180))
+    history_start = _history_start_date(settings, target_dates[0], history_days)
+    history_start = history_start or target_dates[0]
+
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT b.*, db.turnover_rate, db.volume_ratio, mf.net_mf_amount,
+                   CASE WHEN b.amount IS NOT NULL AND b.amount <> 0 THEN mf.net_mf_amount * 1000.0 / b.amount ELSE NULL END AS net_mf_rate
+            FROM {qname(settings, 'daily_bars')} b
+            LEFT JOIN {qname(settings, 'daily_basic')} db
+              ON db.ts_code=b.ts_code AND db.trade_date=b.trade_date
+            LEFT JOIN {qname(settings, 'moneyflow_daily')} mf
+              ON mf.ts_code=b.ts_code AND mf.trade_date=b.trade_date
+            WHERE b.trade_date BETWEEN %s AND %s
+              AND b.adj_close IS NOT NULL
+            ORDER BY b.ts_code, b.trade_date
+            """,
+            (history_start, target_dates[-1]),
+        )
+        bar_rows = cur.fetchall()
+        cur.execute(
+            f"SELECT * FROM {qname(settings, 'limit_events')} WHERE trade_date BETWEEN %s AND %s",
+            (target_dates[0], target_dates[-1]),
+        )
+        limit_rows = [dict(row) for row in cur.fetchall()]
+        cur.execute(
+            f"SELECT * FROM {qname(settings, 'lhb_stocks')} WHERE trade_date BETWEEN %s AND %s",
+            (target_dates[0], target_dates[-1]),
+        )
+        lhb_rows = [dict(row) for row in cur.fetchall()]
+
+    df = pd.DataFrame(bar_rows)
+    if df.empty:
+        raise RuntimeError(f"No daily bars available for stock_signal_daily range {start_value} to {end_value}")
+    numeric_cols = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "pct_chg",
+        "vol",
+        "amount",
+        "adj_open",
+        "adj_high",
+        "adj_low",
+        "adj_close",
+        "turnover_rate",
+        "volume_ratio",
+        "net_mf_amount",
+        "net_mf_rate",
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = add_indicators(df, formula_spec)
+    target_set = set(target_dates)
+    current = df[df["trade_date"].astype(str).isin(target_set)].copy()
+    if current.empty:
+        raise RuntimeError(f"No current daily bars for stock_signal_daily range {start_value} to {end_value}")
+
+    rows = _build_stock_signal_rows(settings, df, current, limit_rows, lhb_rows, formula_spec)
+    columns = _stock_signal_columns()
+    with connect() as conn:
+        with conn.cursor() as cur:
+            for date_text in target_dates:
+                cur.execute(f"DELETE FROM {qname(settings, 'stock_signal_daily')} WHERE trade_date=%s", (date_text,))
+        count = upsert_rows(
+            conn,
+            table=qname(settings, "stock_signal_daily"),
+            columns=columns,
+            rows=rows,
+            conflict_columns=["trade_date", "ts_code"],
+        )
+        conn.commit()
+
+    return {
+        "stock_signal_range_start": start_value,
+        "stock_signal_range_end": end_value,
+        "stock_signal_target_dates": len(date_rows),
+        "stock_signal_refreshed_dates": len(target_dates),
+        "stock_signal_skipped_complete_dates": skipped_complete,
+        "stock_signal_skipped_no_bars": skipped_no_bars,
+        "stock_signal_expected_rows": expected_rows,
+        "stock_signal_daily_rows": count,
+    }
 
 
 def refresh_theme_signal_daily(settings: Settings, trade_date: str | None = None) -> dict[str, Any]:

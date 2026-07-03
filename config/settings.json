@@ -10,7 +10,7 @@
     "include_all_a_data": true
   },
   "data": {
-    "trade_calendar_start_date": "2010-01-01",
+    "trade_calendar_start_date": "2000-01-01",
     "trade_calendar_future_years": 2,
     "all_a_lookback_trading_days": 90,
     "daily_fetch_recent_trading_days": 5,

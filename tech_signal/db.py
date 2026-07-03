@@ -442,6 +442,23 @@ def init_schema(settings: Settings) -> None:
                 pct_chg numeric,
                 amount_yi numeric,
                 turnover_rate numeric,
+                ma5 numeric,
+                ma10 numeric,
+                ma20 numeric,
+                ma60 numeric,
+                bias5 numeric,
+                rsi14 numeric,
+                macd numeric,
+                macd_signal numeric,
+                macd_hist numeric,
+                vol_ma5 numeric,
+                vol_ma20 numeric,
+                prev_vol_ma5 numeric,
+                prev_vol_ma20 numeric,
+                volume_ratio_5 numeric,
+                volume_ratio_20 numeric,
+                high20 numeric,
+                low20 numeric,
                 volume_ratio numeric,
                 technical_score numeric,
                 price_volume_score numeric,
@@ -538,6 +555,26 @@ def init_schema(settings: Settings) -> None:
         cur.execute(f"ALTER TABLE {schema}.latest_signals ADD COLUMN IF NOT EXISTS volume_state text")
         cur.execute(f"ALTER TABLE {schema}.latest_signals ADD COLUMN IF NOT EXISTS volume_ratio_5 numeric")
         cur.execute(f"ALTER TABLE {schema}.latest_signals ADD COLUMN IF NOT EXISTS volume_ratio_20 numeric")
+        for column in [
+            "ma5 numeric",
+            "ma10 numeric",
+            "ma20 numeric",
+            "ma60 numeric",
+            "bias5 numeric",
+            "rsi14 numeric",
+            "macd numeric",
+            "macd_signal numeric",
+            "macd_hist numeric",
+            "vol_ma5 numeric",
+            "vol_ma20 numeric",
+            "prev_vol_ma5 numeric",
+            "prev_vol_ma20 numeric",
+            "volume_ratio_5 numeric",
+            "volume_ratio_20 numeric",
+            "high20 numeric",
+            "low20 numeric",
+        ]:
+            cur.execute(f"ALTER TABLE {schema}.stock_signal_daily ADD COLUMN IF NOT EXISTS {column}")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_daily_bars_date ON {schema}.daily_bars(trade_date)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_daily_basic_date ON {schema}.daily_basic(trade_date)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_index_daily_date ON {schema}.index_daily(trade_date)")
