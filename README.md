@@ -26,7 +26,7 @@
 - 观察池 `priority` / `watching` / `A` / `B` 候选。
 - 全 A 股保留数据库已有历史；首轮或手动 `--days` 回补时使用 90 个交易日作为默认历史窗口。
 - 日常定时任务只抓最近 5 个交易日的日线、复权因子和基础估值数据，降低 Tushare 调用压力。
-- 交易日历独立同步，默认请求 `2010-01-01` 到当前年份后 2 年年底；Tushare 当前实际可返回到的未来日期以接口结果为准。
+- 交易日历独立同步，默认请求 `2000-01-01` 到当前年份后 2 年年底；Tushare 当前实际可返回到的未来日期以接口结果为准。
 - 前复权价格字段日常刷新最近抓取窗口；若某只股票最新 `adj_factor` 相对上一交易日变化，则刷新该股票全历史前复权价。
 - 个股资金流默认按交易日拉全市场 `pro.moneyflow(trade_date=...)`，日常只拉最近 5 个交易日。
 - 成交量和成交额随日线入库；量能状态使用不含当日的前 5 日均量判断，放量突破/缩量回踩使用不含当日的前 20 日均量确认。
@@ -58,10 +58,16 @@ python run_technical_signal.py evening-pipeline
 python run_technical_signal.py run
 python run_technical_signal.py run --days 90
 python run_technical_signal.py report
+python run_technical_signal.py factor-lab init-schema
+python run_technical_signal.py factor-lab build-factors --start-date 20250101 --end-date 20260703
+python run_technical_signal.py factor-lab evaluate --start-date 20250101 --end-date 20260703
+python run_technical_signal.py factor-lab correlate --start-date 20250101 --end-date 20260703
+python run_technical_signal.py factor-lab backtest --start-date 20250101 --end-date 20260703 --top-n 20 --hold-days 5
+python run_technical_signal.py factor-lab report --date 20260703
 python install_windows_task.py
 ```
 
-说明：日常自动化使用拆分任务；`run` 保留为手动全流程；`--days` 用于首轮初始化或需要补历史数据时手动扩大抓取窗口。`backfill-daily` 用于慢速回补历史日线、复权因子和 daily_basic，默认每次 Tushare 请求后等待 1.2 秒，失败后可重新运行续补。`backfill-trading-data` 用于按日期区间补全市场个股资金流、涨跌停/炸板、龙虎榜、市场/行业/概念资金流；默认跳过看起来已经完整的交易日，加 `--force` 可强制重抓。`backfill-market-layers` 用于按日期区间补 `index_daily`、`global_index_daily` 和 `dragon_leader_daily`；龙头候选只做技术层评分，若当天底层全 A 信号不存在会先生成 `stock_signal_daily` / `theme_signal_daily`，加 `--force-signals` 会强制重算这些底层信号。`backfill-signal-layers` 用于按日期区间补齐观察池技术信号、全 A 个股交易信号和主题热度；默认跳过完整日期，并只补缺的全 A 个股/主题层，加 `--force` 才会强制重算三层；该命令按日期升序执行，最后一个交易日会落到 `latest_signals`。`backfill-stock-signals` 只回算全 A `stock_signal_daily`，适合早期没有资金流、涨跌停和龙虎榜数据的历史区间；它会落库 MA、RSI、MACD、量比、20日高低点和量价评分。Tushare 单接口失败会短重试，抓取/晚间流水线整条失败会等待 20 分钟重试，最多再试 2 次。
+说明：日常自动化使用拆分任务；`run` 保留为手动全流程；`--days` 用于首轮初始化或需要补历史数据时手动扩大抓取窗口。`backfill-daily` 用于慢速回补历史日线、复权因子和 daily_basic，默认每次 Tushare 请求后等待 1.2 秒，失败后可重新运行续补。`backfill-trading-data` 用于按日期区间补全市场个股资金流、涨跌停/炸板、龙虎榜、市场/行业/概念资金流；默认跳过看起来已经完整的交易日，加 `--force` 可强制重抓。`backfill-market-layers` 用于按日期区间补 `index_daily`、`global_index_daily` 和 `dragon_leader_daily`；龙头候选只做技术层评分，若当天底层全 A 信号不存在会先生成 `stock_signal_daily` / `theme_signal_daily`，加 `--force-signals` 会强制重算这些底层信号。`backfill-signal-layers` 用于按日期区间补齐观察池技术信号、全 A 个股交易信号和主题热度；默认跳过完整日期，并只补缺的全 A 个股/主题层，加 `--force` 才会强制重算三层；该命令按日期升序执行，最后一个交易日会落到 `latest_signals`。`backfill-stock-signals` 只回算全 A `stock_signal_daily`，适合早期没有资金流、涨跌停和龙虎榜数据的历史区间；它会落库 MA、RSI、MACD、量比、20日高低点和量价评分。`factor-lab` 是研究模块，输出因子评估、相关性、权重建议和组合回测，不修改生产评分权重，也不进入定时任务。Tushare 单接口失败会短重试，抓取/晚间流水线整条失败会等待 20 分钟重试，最多再试 2 次。
 
 定时任务：
 
@@ -104,6 +110,12 @@ tech_signal.latest_signals
 tech_signal.stock_signal_daily
 tech_signal.theme_signal_daily
 tech_signal.dragon_leader_daily
+tech_signal.factor_daily
+tech_signal.factor_performance
+tech_signal.factor_correlation
+tech_signal.model_weight_history
+tech_signal.strategy_backtest_result
+tech_signal.strategy_backtest_trades
 tech_signal.signal_runs
 ```
 
@@ -112,6 +124,17 @@ tech_signal.signal_runs
 - `index_daily`：A 股主要指数日行情，覆盖上证指数、深成指、创业板指、科创50、沪深300、中证500、中证1000、北证50。
 - `global_index_daily`：海外主要指数结构化行情，覆盖道指、标普500、纳指、德国DAX、法国CAC40、英国富时100、日经225、韩国KOSPI；`data_status` 标记最新收盘、同日/盘中或旧数据状态。
 - `dragon_leader_daily`：技术层龙头候选排序，来自全 A 个股交易信号、涨跌停、龙虎榜和主题热度；只写技术评分、排序、原因和风险标签。
+- `factor_daily` / `factor_performance` / `factor_correlation` / `model_weight_history` / `strategy_backtest_*`：因子研究和回测校准层，只做评估报告，不替换 `stock_signal_daily` 生产评分。
+
+因子研究模块：
+
+- 代码在 `factor_lab/`，报告输出到 `E:\technical_signals\factor_lab\reports\`。
+- 第一版从现有 `stock_signal_daily`、`daily_bars`、资金流、涨跌停和龙虎榜字段派生因子，不新增外部数据源。
+- 覆盖趋势、量能、资金、短线情绪、龙虎榜、风险、反转和相对强弱因子。
+- 单因子检验输出 1/3/5/10 日未来收益窗口的 IC、RankIC、ICIR、top/bottom 20%、long-short、胜率、回撤和衰减。
+- 相关性模块用每日横截面相关性的时间窗口均值标记长期高相关因子；绝对相关高于 0.75 的因子在去相关权重里降权。
+- 组合回测使用收盘信号、次日开盘买入、固定持有期、等权、低成交额过滤、一字涨停过滤、交易成本和滑点；第一版用于比较因子方案，不作为生产交易模拟器。
+- 权重建议包括人工基准、单因子表现加权和去相关后权重；默认只报告建议，不写回生产评分配置。
 
 指标说明：
 

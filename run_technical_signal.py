@@ -954,6 +954,11 @@ def execute_with_retries(settings, args) -> dict[str, Any]:
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "factor-lab":
+        from factor_lab.run_factor_lab import main as factor_lab_main
+
+        return factor_lab_main(sys.argv[2:])
+
     parser = argparse.ArgumentParser(description="Independent A-share technical signal system")
     parser.add_argument(
         "command",

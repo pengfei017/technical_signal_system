@@ -547,6 +547,126 @@ def init_schema(settings: Settings) -> None:
             )
             """
         )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.factor_daily (
+                trade_date date NOT NULL,
+                ts_code text NOT NULL,
+                factor_name text NOT NULL,
+                factor_group text NOT NULL,
+                factor_value numeric,
+                factor_rank numeric,
+                factor_pct_rank numeric,
+                is_valid boolean NOT NULL DEFAULT true,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (trade_date, ts_code, factor_name)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.factor_performance (
+                factor_name text NOT NULL,
+                factor_group text NOT NULL,
+                start_date date NOT NULL,
+                end_date date NOT NULL,
+                horizon_days integer NOT NULL,
+                sample_count integer NOT NULL DEFAULT 0,
+                ic_mean numeric,
+                rank_ic_mean numeric,
+                ic_ir numeric,
+                top_quantile_return numeric,
+                bottom_quantile_return numeric,
+                long_short_return numeric,
+                quantile_returns jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                win_rate numeric,
+                avg_return numeric,
+                avg_drawdown numeric,
+                max_drawdown numeric,
+                decay_days integer,
+                market_regime text NOT NULL DEFAULT 'all',
+                created_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (factor_name, start_date, end_date, horizon_days, market_regime)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.factor_correlation (
+                start_date date NOT NULL,
+                end_date date NOT NULL,
+                factor_a text NOT NULL,
+                factor_b text NOT NULL,
+                correlation numeric,
+                sample_count integer NOT NULL DEFAULT 0,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (start_date, end_date, factor_a, factor_b)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.model_weight_history (
+                model_name text NOT NULL,
+                as_of_date date NOT NULL,
+                factor_name text NOT NULL,
+                factor_group text NOT NULL,
+                weight numeric NOT NULL,
+                method text NOT NULL,
+                train_start date,
+                train_end date,
+                validation_start date,
+                validation_end date,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (model_name, as_of_date, factor_name, method)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.strategy_backtest_result (
+                model_name text NOT NULL,
+                start_date date NOT NULL,
+                end_date date NOT NULL,
+                rebalance_rule text NOT NULL,
+                hold_days integer NOT NULL,
+                top_n integer NOT NULL,
+                sample_split text NOT NULL DEFAULT 'full',
+                total_return numeric,
+                annual_return numeric,
+                max_drawdown numeric,
+                sharpe numeric,
+                win_rate numeric,
+                avg_turnover numeric,
+                avg_holding_days numeric,
+                trade_count integer NOT NULL DEFAULT 0,
+                benchmark_return numeric,
+                excess_return numeric,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (model_name, start_date, end_date, rebalance_rule, hold_days, top_n, sample_split)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.strategy_backtest_trades (
+                model_name text NOT NULL,
+                trade_date date NOT NULL,
+                ts_code text NOT NULL,
+                action text NOT NULL,
+                price numeric,
+                weight numeric,
+                score numeric,
+                reason text,
+                holding_days integer,
+                exit_date date,
+                exit_price numeric,
+                return_pct numeric,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (model_name, trade_date, ts_code, action)
+            )
+            """
+        )
         cur.execute(f"ALTER TABLE {schema}.technical_signals ADD COLUMN IF NOT EXISTS prev_vol_ma5 numeric")
         cur.execute(f"ALTER TABLE {schema}.technical_signals ADD COLUMN IF NOT EXISTS prev_vol_ma20 numeric")
         cur.execute(f"ALTER TABLE {schema}.technical_signals ADD COLUMN IF NOT EXISTS volume_ratio_5 numeric")
@@ -555,6 +675,7 @@ def init_schema(settings: Settings) -> None:
         cur.execute(f"ALTER TABLE {schema}.latest_signals ADD COLUMN IF NOT EXISTS volume_state text")
         cur.execute(f"ALTER TABLE {schema}.latest_signals ADD COLUMN IF NOT EXISTS volume_ratio_5 numeric")
         cur.execute(f"ALTER TABLE {schema}.latest_signals ADD COLUMN IF NOT EXISTS volume_ratio_20 numeric")
+        cur.execute(f"ALTER TABLE {schema}.factor_performance ADD COLUMN IF NOT EXISTS quantile_returns jsonb NOT NULL DEFAULT '{{}}'::jsonb")
         for column in [
             "ma5 numeric",
             "ma10 numeric",
@@ -588,6 +709,13 @@ def init_schema(settings: Settings) -> None:
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_limit_events_date_type ON {schema}.limit_events(trade_date, limit_type)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_lhb_stocks_date_net ON {schema}.lhb_stocks(trade_date, lhb_net_buy_yi DESC)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_moneyflow_stock_date ON {schema}.moneyflow_stock(trade_date)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_factor_daily_factor_date ON {schema}.factor_daily(factor_name, trade_date)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_factor_daily_date_factor ON {schema}.factor_daily(trade_date, factor_name)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_factor_perf_factor ON {schema}.factor_performance(factor_name, horizon_days, market_regime)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_factor_corr_abs ON {schema}.factor_correlation(start_date, end_date, correlation)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_weight_model_date ON {schema}.model_weight_history(model_name, as_of_date)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_backtest_result_date ON {schema}.strategy_backtest_result(start_date, end_date)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_backtest_trades_date ON {schema}.strategy_backtest_trades(model_name, trade_date)")
         conn.commit()
 
 
