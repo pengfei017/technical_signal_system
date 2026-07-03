@@ -1,4 +1,7 @@
 Set shell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
+batchPath = scriptDir & "\run_technical_signal.bat"
 args = ""
 For Each arg In WScript.Arguments
     If Len(args) > 0 Then
@@ -9,4 +12,6 @@ Next
 If Len(args) = 0 Then
     args = """run"""
 End If
-shell.Run "cmd /c ""D:\technical_signal_system\run_technical_signal.bat"" " & args, 0, False
+cmd = shell.ExpandEnvironmentStrings("%ComSpec%") & " /c " & """" & """" & batchPath & """ " & args & """"
+exitCode = shell.Run(cmd, 0, True)
+WScript.Quit exitCode
