@@ -37,6 +37,12 @@ TASKS = [
         "time": "20:20",
         "command": r'wscript.exe D:\technical_signal_system\run_technical_signal_hidden.vbs evening-pipeline',
     },
+    {
+        "name": "TechnicalSignalFactorShadowDaily",
+        "schedule": ["DAILY"],
+        "time": "20:55",
+        "command": r'wscript.exe D:\technical_signal_system\run_technical_signal_hidden.vbs factor-lab shadow-run --date latest',
+    },
 ]
 
 

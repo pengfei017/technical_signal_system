@@ -18,8 +18,10 @@ from .factor_definitions import (
     add_cross_sectional_ranks,
     compute_factor_values,
     factor_group,
+    higher_is_better,
     load_factor_base,
     normalize_date,
+    oriented_factor_value,
     selected_factor_names,
     target_slice,
 )
@@ -62,6 +64,16 @@ def _safe_corr(left: pd.Series, right: pd.Series, *, rank: bool = False) -> floa
         frame = frame.rank(method="average")
     value = frame["x"].corr(frame["y"])
     return _clean_float(value)
+
+
+def _numeric_series(value: Any) -> pd.Series:
+    if isinstance(value, pd.DataFrame):
+        series = value.stack()
+    elif isinstance(value, pd.Series):
+        series = value
+    else:
+        series = pd.Series(value)
+    return pd.to_numeric(series, errors="coerce")
 
 
 def build_factor_daily(
@@ -146,7 +158,7 @@ def _load_forward_returns(settings: Settings, start_date: str, end_date: str, ho
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT trade_date, ts_code, adj_close, pct_chg, amount
+            SELECT trade_date, ts_code, adj_open, adj_close, pct_chg, amount
             FROM {qname(settings, 'daily_bars')}
             WHERE trade_date BETWEEN %s::date - interval '5 days'
                                   AND %s::date + (%s || ' days')::interval
@@ -160,13 +172,14 @@ def _load_forward_returns(settings: Settings, start_date: str, end_date: str, ho
     if df.empty:
         return df
     df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
-    for column in ["adj_close", "pct_chg", "amount"]:
+    for column in ["adj_open", "adj_close", "pct_chg", "amount"]:
         df[column] = pd.to_numeric(df[column], errors="coerce")
     df = df.sort_values(["ts_code", "trade_date"])
     grouped = df.groupby("ts_code", group_keys=False)
+    df["entry_price"] = grouped["adj_open"].shift(-1)
     for horizon in horizons:
-        future = grouped["adj_close"].shift(-horizon)
-        df[f"fwd_return_{horizon}"] = future / df["adj_close"] - 1.0
+        exit_price = grouped["adj_close"].shift(-horizon)
+        df[f"fwd_return_{horizon}"] = exit_price / df["entry_price"] - 1.0
     start_dt = pd.to_datetime(start_value).date()
     end_dt = pd.to_datetime(end_value).date()
     return df[(df["trade_date"] >= start_dt) & (df["trade_date"] <= end_dt)].copy()
@@ -209,6 +222,8 @@ def _factor_rows(settings: Settings, factor_name: str, start_date: str, end_date
         return df
     df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
     df["factor_value"] = pd.to_numeric(df["factor_value"], errors="coerce")
+    df["factor_raw_value"] = df["factor_value"]
+    df["factor_value"] = oriented_factor_value(factor_name, df["factor_value"])
     df["factor_pct_rank"] = pd.to_numeric(df["factor_pct_rank"], errors="coerce")
     return df.replace([np.inf, -np.inf], np.nan)
 
@@ -231,8 +246,15 @@ def _evaluate_one(frame: pd.DataFrame, horizon: int) -> dict[str, Any]:
             "avg_drawdown": None,
             "max_drawdown": None,
         }
-    daily_ic = data.groupby("trade_date").apply(lambda g: _safe_corr(g["factor_value"], g[ret_col]), include_groups=False)
-    daily_rank_ic = data.groupby("trade_date").apply(lambda g: _safe_corr(g["factor_value"], g[ret_col], rank=True), include_groups=False)
+    daily_ic = _numeric_series(
+        data.groupby("trade_date").apply(lambda g: _safe_corr(g["factor_value"], g[ret_col]), include_groups=False)
+    )
+    daily_rank_ic = _numeric_series(
+        data.groupby("trade_date").apply(
+            lambda g: _safe_corr(g["factor_value"], g[ret_col], rank=True),
+            include_groups=False,
+        )
+    )
     top = data[data["factor_pct_rank"] >= 0.8].groupby("trade_date")[ret_col].mean()
     bottom = data[data["factor_pct_rank"] <= 0.2].groupby("trade_date")[ret_col].mean()
     long_short = (top - bottom).dropna()
@@ -247,10 +269,11 @@ def _evaluate_one(frame: pd.DataFrame, horizon: int) -> dict[str, Any]:
     for label in ["q1", "q2", "q3", "q4", "q5"]:
         quantile_returns[label] = _clean_float(grouped_quantiles.get(label))
     avg_drawdown, max_drawdown = _drawdown_stats(long_short)
-    ic_std = daily_ic.dropna().std()
+    clean_ic = daily_ic.dropna()
+    ic_std = _clean_float(clean_ic.std())
     ic_ir = None
-    if ic_std and not math.isclose(float(ic_std), 0.0):
-        ic_ir = float(daily_ic.dropna().mean() / ic_std * math.sqrt(max(len(daily_ic.dropna()), 1)))
+    if ic_std is not None and not math.isclose(ic_std, 0.0):
+        ic_ir = float(clean_ic.mean() / ic_std * math.sqrt(max(len(clean_ic), 1)))
     return {
         "sample_count": int(len(data)),
         "ic_mean": _clean_float(daily_ic.mean()),
@@ -442,6 +465,8 @@ def write_factor_performance_report(settings: Settings, start_date: str, end_dat
         f"# Factor Performance {normalize_date(start_date)} to {normalize_date(end_date)}",
         "",
         "研究模块输出，不替换生产评分。",
+        "收益口径：trade_date 收盘后生成信号，下一交易日复权开盘买入，持有 N 个交易日，按复权收盘退出。",
+        "风险因子保留原始 factor_value，但评估和 pct_rank 使用正向口径：低风险为高分。",
         "",
     ]
     if data.empty:

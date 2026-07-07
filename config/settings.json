@@ -54,6 +54,12 @@
     "top_n": 300,
     "min_amount_yi": 20.0
   },
+  "factor_lab_shadow": {
+    "enabled": true,
+    "production_top_n": 30,
+    "tracking_lookback_days": 30,
+    "research_start_date": "2020-01-02"
+  },
   "automation": {
     "task_retry_count": 2,
     "task_retry_sleep_seconds": 1200

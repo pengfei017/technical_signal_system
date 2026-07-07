@@ -20,15 +20,24 @@ BASE_GROUP_WEIGHTS = {
     "moneyflow": 0.20,
     "sentiment": 0.15,
     "lhb": 0.10,
-    "risk": -0.10,
+    "risk": 0.10,
     "reversal": 0.05,
     "relative_strength": 0.05,
 }
 
 
-def _split_dates(start_date: str, end_date: str) -> dict[str, str]:
+def _split_dates(start_date: str, end_date: str, *, train_only: bool = False) -> dict[str, str | None]:
     start = pd.to_datetime(normalize_date(start_date))
     end = pd.to_datetime(normalize_date(end_date))
+    if train_only:
+        return {
+            "train_start": start.date().isoformat(),
+            "train_end": end.date().isoformat(),
+            "validation_start": None,
+            "validation_end": None,
+            "test_start": None,
+            "test_end": None,
+        }
     span = max((end - start).days, 1)
     train_end = start + pd.Timedelta(days=int(span * 0.6))
     validation_end = start + pd.Timedelta(days=int(span * 0.8))
@@ -49,6 +58,16 @@ def _normalize_abs(weights: dict[str, float]) -> dict[str, float]:
     return {name: value / total for name, value in weights.items()}
 
 
+def _apply_direction_constraints(weights: dict[str, float]) -> dict[str, float]:
+    adjusted = weights.copy()
+    for name, value in list(adjusted.items()):
+        if factor_group(name) == "risk":
+            adjusted[name] = max(float(value), 0.0)
+    if sum(abs(value) for value in adjusted.values()) <= 1e-12:
+        return baseline_weights()
+    return _normalize_abs(adjusted)
+
+
 def baseline_weights() -> dict[str, float]:
     by_group: dict[str, list[str]] = {}
     for item in FACTOR_DEFINITIONS:
@@ -60,7 +79,7 @@ def baseline_weights() -> dict[str, float]:
             continue
         for name in names:
             weights[name] = group_weight / len(names)
-    return _normalize_abs(weights)
+    return _apply_direction_constraints(_normalize_abs(weights))
 
 
 def _load_performance(settings: Settings, start_date: str, end_date: str, horizon_days: int) -> pd.DataFrame:
@@ -85,6 +104,49 @@ def _load_performance(settings: Settings, start_date: str, end_date: str, horizo
     return data
 
 
+def _ensure_research_inputs(settings: Settings, start_date: str, end_date: str, horizon_days: int) -> None:
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT count(*) AS n
+            FROM {qname(settings, 'factor_daily')}
+            WHERE trade_date BETWEEN %s AND %s
+            """,
+            (normalize_date(start_date), normalize_date(end_date)),
+        )
+        factor_daily_count = int(cur.fetchone()["n"] or 0)
+        cur.execute(
+            f"""
+            SELECT count(*) AS n
+            FROM {qname(settings, 'factor_performance')}
+            WHERE start_date=%s AND end_date=%s AND horizon_days=%s AND market_regime='all'
+            """,
+            (normalize_date(start_date), normalize_date(end_date), horizon_days),
+        )
+        perf_count = int(cur.fetchone()["n"] or 0)
+        cur.execute(
+            f"""
+            SELECT count(*) AS n
+            FROM {qname(settings, 'factor_correlation')}
+            WHERE start_date=%s AND end_date=%s
+            """,
+            (normalize_date(start_date), normalize_date(end_date)),
+        )
+        corr_count = int(cur.fetchone()["n"] or 0)
+    if factor_daily_count == 0:
+        from .factor_evaluator import build_factor_daily
+
+        build_factor_daily(settings, start_date, end_date)
+    if perf_count == 0:
+        from .factor_evaluator import evaluate_factors
+
+        evaluate_factors(settings, start_date, end_date, horizons=[1, 3, 5, 10])
+    if corr_count == 0:
+        from .factor_evaluator import correlate_factors
+
+        correlate_factors(settings, start_date, end_date)
+
+
 def performance_weights(settings: Settings, start_date: str, end_date: str, horizon_days: int = 5) -> dict[str, float]:
     data = _load_performance(settings, start_date, end_date, horizon_days)
     if data.empty:
@@ -100,7 +162,7 @@ def performance_weights(settings: Settings, start_date: str, end_date: str, hori
         weights[str(row.factor_name)] = raw
     if sum(abs(value) for value in weights.values()) <= 1e-12:
         return baseline_weights()
-    return _normalize_abs(weights)
+    return _apply_direction_constraints(_normalize_abs(weights))
 
 
 def _load_correlations(settings: Settings, start_date: str, end_date: str) -> pd.DataFrame:
@@ -137,7 +199,36 @@ def decorrelated_weights(settings: Settings, start_date: str, end_date: str, hor
             adjusted[left] *= 0.5
         else:
             adjusted[right] *= 0.5
-    return _normalize_abs(adjusted)
+    return _apply_direction_constraints(_normalize_abs(adjusted))
+
+
+def event_adjusted_weights(settings: Settings, start_date: str, end_date: str, horizon_days: int = 5) -> dict[str, float]:
+    weights = decorrelated_weights(settings, start_date, end_date, horizon_days)
+    event_groups = {"lhb", "sentiment"}
+    event_names = {item.name for item in FACTOR_DEFINITIONS if item.group in event_groups}
+    event_abs = sum(abs(value) for name, value in weights.items() if name in event_names)
+    max_event_abs = 0.25
+    if event_abs > max_event_abs and event_abs > 0:
+        scale = max_event_abs / event_abs
+        for name in list(weights):
+            if name in event_names:
+                weights[name] *= scale
+    return _apply_direction_constraints(_normalize_abs(weights))
+
+
+def _reason_for_weight(model_name: str, factor_name: str, weight: float) -> str:
+    group = factor_group(factor_name)
+    if model_name == "baseline_v1":
+        return f"人工基准：{group} 组固定权重均分"
+    if model_name == "ic_weighted_v1":
+        return "训练集 IC/RankIC、胜率和回撤综合加权；未使用验证/测试收益寻优"
+    if model_name == "decorrelated_v1":
+        return "训练集表现加权后，对高相关因子降权，避免重复叠加同类信号"
+    if model_name == "event_adjusted_v1":
+        return "事件型因子只做确认信号并设置总权重上限，不与连续因子简单等价叠加"
+    if model_name == "walk_forward_v1":
+        return "滚动训练窗口生成的权重，仅用于之后窗口验证"
+    return "研究权重"
 
 
 def optimize_weights(
@@ -147,14 +238,20 @@ def optimize_weights(
     *,
     as_of_date: str | None = None,
     horizon_days: int = 5,
+    train_only: bool = False,
 ) -> dict[str, Any]:
     init_schema(settings)
     as_of = normalize_date(as_of_date or end_date)
-    split = _split_dates(start_date, end_date)
+    split = _split_dates(start_date, end_date, train_only=train_only)
+    train_start = str(split["train_start"])
+    train_end = str(split["train_end"])
+    _ensure_research_inputs(settings, train_start, train_end, horizon_days)
     methods = {
         "baseline_v1": ("manual_baseline", baseline_weights()),
-        "ic_weighted_v1": ("ic_rankic_drawdown_weighted", performance_weights(settings, start_date, end_date, horizon_days)),
-        "decorrelated_v1": ("decorrelated_ic_weighted", decorrelated_weights(settings, start_date, end_date, horizon_days)),
+        "ic_weighted_v1": ("train_ic_rankic_drawdown_weighted", performance_weights(settings, train_start, train_end, horizon_days)),
+        "decorrelated_v1": ("train_decorrelated_ic_weighted", decorrelated_weights(settings, train_start, train_end, horizon_days)),
+        "event_adjusted_v1": ("train_event_confirmed_decorrelated", event_adjusted_weights(settings, train_start, train_end, horizon_days)),
+        "walk_forward_v1": ("rolling_train_decorrelated", decorrelated_weights(settings, train_start, train_end, horizon_days)),
     }
     rows: list[dict[str, Any]] = []
     for model_name, (method, weights) in methods.items():
@@ -167,10 +264,12 @@ def optimize_weights(
                     "factor_group": factor_group(factor_name),
                     "weight": _clean_float(weight) or 0.0,
                     "method": method,
+                    "horizon_days": horizon_days,
                     "train_start": split["train_start"],
                     "train_end": split["train_end"],
                     "validation_start": split["validation_start"],
                     "validation_end": split["validation_end"],
+                    "reason": _reason_for_weight(model_name, factor_name, _clean_float(weight) or 0.0),
                 }
             )
     columns = [
@@ -180,10 +279,12 @@ def optimize_weights(
         "factor_group",
         "weight",
         "method",
+        "horizon_days",
         "train_start",
         "train_end",
         "validation_start",
         "validation_end",
+        "reason",
     ]
     with connect() as conn:
         count = upsert_rows(
@@ -191,7 +292,7 @@ def optimize_weights(
             table=qname(settings, "model_weight_history"),
             columns=columns,
             rows=rows,
-            conflict_columns=["model_name", "as_of_date", "factor_name", "method"],
+            conflict_columns=["model_name", "as_of_date", "factor_name", "method", "horizon_days", "train_start", "train_end"],
         )
         conn.commit()
     path = write_weight_report(settings, start_date, end_date, rows)
@@ -200,23 +301,47 @@ def optimize_weights(
         "model_count": len(methods),
         "weight_rows": count,
         "report_file": str(path),
+        "train_only": train_only,
         **split,
     }
 
 
-def load_model_weights(settings: Settings, model_name: str, as_of_date: str) -> dict[str, float]:
+def load_model_weights(
+    settings: Settings,
+    model_name: str,
+    as_of_date: str,
+    *,
+    horizon_days: int | None = None,
+    train_start: str | None = None,
+    train_end: str | None = None,
+    fallback: bool = True,
+) -> dict[str, float]:
+    filters = ["model_name=%s", "as_of_date=%s"]
+    params: list[Any] = [model_name, normalize_date(as_of_date)]
+    if horizon_days is not None:
+        filters.append("horizon_days=%s")
+        params.append(int(horizon_days))
+    if train_start is not None:
+        filters.append("train_start=%s")
+        params.append(normalize_date(train_start))
+    if train_end is not None:
+        filters.append("train_end=%s")
+        params.append(normalize_date(train_end))
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
             f"""
             SELECT factor_name, weight
             FROM {qname(settings, 'model_weight_history')}
-            WHERE model_name=%s AND as_of_date=%s
+            WHERE {' AND '.join(filters)}
+            ORDER BY created_at DESC
             """,
-            (model_name, normalize_date(as_of_date)),
+            tuple(params),
         )
         rows = cur.fetchall()
     weights = {str(row["factor_name"]): float(row["weight"]) for row in rows}
-    return weights or baseline_weights()
+    if weights:
+        return weights
+    return baseline_weights() if fallback else {}
 
 
 def write_weight_report(settings: Settings, start_date: str, end_date: str, rows: list[dict[str, Any]]) -> Path:
@@ -230,17 +355,19 @@ def write_weight_report(settings: Settings, start_date: str, end_date: str, rows
         "## Summary",
         "",
         "- baseline_v1: manual group baseline.",
-        "- ic_weighted_v1: IC/RankIC/win-rate/drawdown weighted.",
-        "- decorrelated_v1: high-correlation pairs above 0.75 are downweighted.",
+        "- ic_weighted_v1: train-only IC/RankIC/win-rate/drawdown weighted.",
+        "- decorrelated_v1: train-only high-correlation pairs above 0.75 are downweighted.",
+        "- event_adjusted_v1: event factors are capped as confirmation signals.",
+        "- walk_forward_v1: rolling train-window weights for future validation.",
         "",
     ]
     if not data.empty:
-        for model in ["baseline_v1", "ic_weighted_v1", "decorrelated_v1"]:
+        for model in ["baseline_v1", "ic_weighted_v1", "decorrelated_v1", "event_adjusted_v1", "walk_forward_v1"]:
             subset = data[data["model_name"] == model].copy()
             subset["abs_weight"] = subset["weight"].abs()
             lines.extend([f"## {model}", ""])
             for row in subset.sort_values("abs_weight", ascending=False).head(20).to_dict("records"):
-                lines.append(f"- {row['factor_name']} ({row['factor_group']}): {row['weight']:.4f}")
+                lines.append(f"- {row['factor_name']} ({row['factor_group']}): {row['weight']:.4f}; {row.get('reason', '')}")
             lines.append("")
     lines.extend(
         [
@@ -253,4 +380,3 @@ def write_weight_report(settings: Settings, start_date: str, end_date: str, rows
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
-

@@ -747,6 +747,21 @@ def process_signals(
     return {**validation_metrics, **signal_metrics, **leader_metrics, "report_file": str(report_path)}
 
 
+def run_factor_shadow(settings, *, trade_date: str) -> dict[str, Any]:
+    shadow_cfg = settings.section("factor_lab_shadow")
+    if shadow_cfg.get("enabled", True) is False:
+        return {"factor_shadow_enabled": False}
+    from factor_lab.shadow_runner import run_shadow_pipeline
+
+    return run_shadow_pipeline(
+        settings,
+        trade_date=trade_date,
+        production_top_n=int(shadow_cfg.get("production_top_n", 30)),
+        tracking_lookback_days=int(shadow_cfg.get("tracking_lookback_days", 30)),
+        research_start_date=str(shadow_cfg.get("research_start_date", "2020-01-02")),
+    )
+
+
 def evening_pipeline(settings, *, skip_moneyflow: bool = False) -> dict[str, Any]:
     market_metrics = ensure_market_data_current(settings)
     trading_metrics = update_trading_data(settings, skip_moneyflow=skip_moneyflow)
@@ -756,7 +771,8 @@ def evening_pipeline(settings, *, skip_moneyflow: bool = False) -> dict[str, Any
         require_moneyflow=not skip_moneyflow,
         require_current_trade_date=True,
     )
-    return {**market_metrics, **trading_metrics, **process_metrics}
+    shadow_metrics = run_factor_shadow(settings, trade_date=str(process_metrics["trade_date"]))
+    return {**market_metrics, **trading_metrics, **process_metrics, **shadow_metrics}
 
 
 def run_all(settings, args) -> dict[str, Any]:
@@ -769,11 +785,13 @@ def run_all(settings, args) -> dict[str, Any]:
         require_moneyflow=not args.skip_moneyflow,
         require_current_trade_date=True,
     )
+    shadow_metrics = run_factor_shadow(settings, trade_date=str(process_metrics["trade_date"]))
     return {
         **calendar_metrics,
         **market_metrics,
         **trading_metrics,
         **process_metrics,
+        **shadow_metrics,
     }
 
 
@@ -900,7 +918,7 @@ def execute_command(settings, args) -> dict[str, Any]:
             end_date=end_date,
             force=args.force,
         )
-    if args.command == "validate-data":
+    if args.command in {"validate-data", "validate"}:
         return validate_data_ready(
             settings,
             trade_date=args.trade_date,
@@ -977,6 +995,7 @@ def main() -> int:
             "backfill-market-layers",
             "backfill-signal-layers",
             "backfill-stock-signals",
+            "validate",
             "validate-data",
             "analyze",
             "report",

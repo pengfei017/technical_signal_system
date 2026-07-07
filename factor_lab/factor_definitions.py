@@ -17,6 +17,14 @@ class FactorDefinition:
     group: str
     description: str
     higher_is_better: bool = True
+    factor_type: str = "continuous"
+
+
+@dataclass(frozen=True)
+class EventDefinition:
+    name: str
+    group: str
+    description: str
 
 
 FACTOR_DEFINITIONS: list[FactorDefinition] = [
@@ -57,6 +65,19 @@ FACTOR_DEFINITIONS: list[FactorDefinition] = [
 FACTOR_BY_NAME = {item.name: item for item in FACTOR_DEFINITIONS}
 DEFAULT_FACTOR_NAMES = [item.name for item in FACTOR_DEFINITIONS]
 RISK_FACTOR_NAMES = {item.name for item in FACTOR_DEFINITIONS if not item.higher_is_better}
+EVENT_DEFINITIONS: list[EventDefinition] = [
+    EventDefinition("lhb_net_buy_positive", "lhb", "LHB total net buy is positive"),
+    EventDefinition("lhb_institution_buy", "lhb", "Institution net buy is positive"),
+    EventDefinition("lhb_northbound_buy", "lhb", "Northbound net buy is positive"),
+    EventDefinition("lhb_buy_amount_ratio_high", "lhb", "LHB buy amount ratio is high"),
+    EventDefinition("limit_first_board", "sentiment", "First limit-up board"),
+    EventDefinition("limit_multi_board", "sentiment", "Multi-board limit-up"),
+    EventDefinition("limit_resealed", "sentiment", "Limit-up reopened and resealed"),
+    EventDefinition("limit_strong_seal", "sentiment", "Limit-up with strong seal amount"),
+    EventDefinition("broken_board", "sentiment", "Broken board"),
+    EventDefinition("limit_down", "risk", "Limit-down event"),
+    EventDefinition("moneyflow_consecutive_3", "moneyflow", "Three-day positive moneyflow"),
+]
 
 
 def normalize_date(value: str | date) -> str:
@@ -69,6 +90,15 @@ def normalize_date(value: str | date) -> str:
 def factor_group(name: str) -> str:
     item = FACTOR_BY_NAME.get(name)
     return item.group if item else "unknown"
+
+
+def higher_is_better(name: str) -> bool:
+    item = FACTOR_BY_NAME.get(name)
+    return bool(item.higher_is_better) if item else True
+
+
+def oriented_factor_value(name: str, value: pd.Series) -> pd.Series:
+    return value if higher_is_better(name) else -value
 
 
 def selected_factor_names(names: Iterable[str] | None = None) -> list[str]:
@@ -116,6 +146,7 @@ def load_factor_base(
                    s.open_times, s.net_mf_amount, s.net_mf_amount_yi,
                    s.net_mf_rate, s.lhb_net_buy_yi,
                    s.institution_net_buy_yi, s.northbound_net_buy_yi,
+                   s.lhb_reason,
                    b.open, b.high, b.low, b.pre_close, b.vol, b.amount,
                    b.adj_open, b.adj_high, b.adj_low, b.adj_close
             FROM {qname(settings, 'stock_signal_daily')} s
@@ -224,6 +255,8 @@ def compute_factor_values(df: pd.DataFrame) -> pd.DataFrame:
     out["sentiment_score"] = out["limit_score"]
 
     out["lhb_buy_amount_ratio"] = _safe_div(out["lhb_net_buy_yi"], out["amount_yi"])
+    out["lhb_institution_net_buy_yi"] = out["institution_net_buy_yi"]
+    out["lhb_northbound_net_buy_yi"] = out["northbound_net_buy_yi"]
 
     out["risk_high_bias5"] = (out["bias5"] - 8.0).clip(lower=0)
     out["risk_below_ma20"] = (out["adj_close"] < out["ma20"]).astype(float)
@@ -255,7 +288,10 @@ def add_cross_sectional_ranks(df: pd.DataFrame, factor_names: Iterable[str]) -> 
         valid = out[name].notna()
         out[rank_col] = np.nan
         out[pct_col] = np.nan
-        out.loc[valid, rank_col] = out.loc[valid].groupby("trade_date")[name].rank(method="average")
+        out.loc[valid, rank_col] = out.loc[valid].groupby("trade_date")[name].rank(
+            method="average",
+            ascending=higher_is_better(name),
+        )
         counts = out.loc[valid].groupby("trade_date")[name].transform("count")
         out.loc[valid, pct_col] = out.loc[valid, rank_col] / counts.where(counts > 0)
     return out
@@ -265,4 +301,3 @@ def target_slice(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFra
     start_value = pd.to_datetime(normalize_date(start_date)).date()
     end_value = pd.to_datetime(normalize_date(end_date)).date()
     return df[(df["trade_date"] >= start_value) & (df["trade_date"] <= end_value)].copy()
-

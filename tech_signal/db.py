@@ -592,6 +592,27 @@ def init_schema(settings: Settings) -> None:
         )
         cur.execute(
             f"""
+            CREATE TABLE IF NOT EXISTS {schema}.factor_event_study (
+                event_name text NOT NULL,
+                event_group text NOT NULL,
+                event_subtype text NOT NULL DEFAULT '',
+                start_date date NOT NULL,
+                end_date date NOT NULL,
+                horizon_days integer NOT NULL,
+                market_regime text NOT NULL DEFAULT 'all',
+                sample_count integer NOT NULL DEFAULT 0,
+                avg_return numeric,
+                avg_excess_return numeric,
+                win_rate numeric,
+                avg_drawdown numeric,
+                max_drawdown numeric,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (event_name, event_subtype, start_date, end_date, horizon_days, market_regime)
+            )
+            """
+        )
+        cur.execute(
+            f"""
             CREATE TABLE IF NOT EXISTS {schema}.factor_correlation (
                 start_date date NOT NULL,
                 end_date date NOT NULL,
@@ -613,12 +634,14 @@ def init_schema(settings: Settings) -> None:
                 factor_group text NOT NULL,
                 weight numeric NOT NULL,
                 method text NOT NULL,
+                horizon_days integer NOT NULL DEFAULT 5,
                 train_start date,
                 train_end date,
                 validation_start date,
                 validation_end date,
+                reason text NOT NULL DEFAULT '',
                 created_at timestamptz NOT NULL DEFAULT now(),
-                PRIMARY KEY (model_name, as_of_date, factor_name, method)
+                PRIMARY KEY (model_name, as_of_date, factor_name, method, horizon_days, train_start, train_end)
             )
             """
         )
@@ -637,6 +660,8 @@ def init_schema(settings: Settings) -> None:
                 max_drawdown numeric,
                 sharpe numeric,
                 win_rate numeric,
+                profit_loss_ratio numeric,
+                buyable_ratio numeric,
                 avg_turnover numeric,
                 avg_holding_days numeric,
                 trade_count integer NOT NULL DEFAULT 0,
@@ -667,6 +692,125 @@ def init_schema(settings: Settings) -> None:
             )
             """
         )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.factor_shadow_candidates (
+                trade_date date NOT NULL,
+                model_name text NOT NULL,
+                top_n integer NOT NULL,
+                hold_days integer NOT NULL,
+                ts_code text NOT NULL,
+                name text,
+                industry text,
+                concepts text,
+                factor_rank integer,
+                factor_score numeric,
+                production_rank integer,
+                production_score numeric,
+                comparison_type text NOT NULL,
+                is_model_pick boolean NOT NULL DEFAULT false,
+                is_production_pick boolean NOT NULL DEFAULT false,
+                reason text,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (trade_date, model_name, top_n, hold_days, ts_code)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.factor_shadow_tracking (
+                signal_date date NOT NULL,
+                model_name text NOT NULL,
+                top_n integer NOT NULL,
+                hold_days integer NOT NULL,
+                ts_code text NOT NULL,
+                horizon_days integer NOT NULL,
+                comparison_type text,
+                entry_date date,
+                entry_price numeric,
+                exit_date date,
+                exit_price numeric,
+                return_pct numeric,
+                is_complete boolean NOT NULL DEFAULT false,
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (signal_date, model_name, top_n, hold_days, ts_code, horizon_days)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.trend_pure_indicator_performance (
+                indicator_name text NOT NULL,
+                indicator_group text NOT NULL,
+                direction text NOT NULL,
+                start_date date NOT NULL,
+                end_date date NOT NULL,
+                horizon_days integer NOT NULL,
+                sample_split text NOT NULL DEFAULT 'full',
+                sample_count integer NOT NULL DEFAULT 0,
+                rank_ic_mean numeric,
+                top_quantile_return numeric,
+                bottom_quantile_return numeric,
+                long_short_return numeric,
+                avg_excess_return numeric,
+                win_rate numeric,
+                max_drawdown numeric,
+                profit_loss_ratio numeric,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (indicator_name, start_date, end_date, horizon_days, sample_split)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.trend_pure_combo_performance (
+                combo_name text NOT NULL,
+                start_date date NOT NULL,
+                end_date date NOT NULL,
+                hold_days integer NOT NULL,
+                top_n integer NOT NULL,
+                sample_split text NOT NULL DEFAULT 'full',
+                avg_return numeric,
+                avg_excess_return numeric,
+                total_return numeric,
+                annual_return numeric,
+                max_drawdown numeric,
+                sharpe numeric,
+                win_rate numeric,
+                profit_loss_ratio numeric,
+                buyable_ratio numeric,
+                avg_turnover numeric,
+                trade_count integer NOT NULL DEFAULT 0,
+                benchmark_return numeric,
+                excess_return numeric,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (combo_name, start_date, end_date, hold_days, top_n, sample_split)
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.factor_data_coverage (
+                as_of_date date NOT NULL,
+                table_name text NOT NULL,
+                min_date date,
+                max_date date,
+                row_count bigint NOT NULL DEFAULT 0,
+                date_count integer NOT NULL DEFAULT 0,
+                stable_start date,
+                stable_end date,
+                open_dates integer NOT NULL DEFAULT 0,
+                ok_dates integer NOT NULL DEFAULT 0,
+                missing_or_low_dates integer NOT NULL DEFAULT 0,
+                first_missing date,
+                last_missing date,
+                threshold_rows integer NOT NULL DEFAULT 1,
+                notes text NOT NULL DEFAULT '',
+                created_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (as_of_date, table_name)
+            )
+            """
+        )
         cur.execute(f"ALTER TABLE {schema}.technical_signals ADD COLUMN IF NOT EXISTS prev_vol_ma5 numeric")
         cur.execute(f"ALTER TABLE {schema}.technical_signals ADD COLUMN IF NOT EXISTS prev_vol_ma20 numeric")
         cur.execute(f"ALTER TABLE {schema}.technical_signals ADD COLUMN IF NOT EXISTS volume_ratio_5 numeric")
@@ -676,6 +820,31 @@ def init_schema(settings: Settings) -> None:
         cur.execute(f"ALTER TABLE {schema}.latest_signals ADD COLUMN IF NOT EXISTS volume_ratio_5 numeric")
         cur.execute(f"ALTER TABLE {schema}.latest_signals ADD COLUMN IF NOT EXISTS volume_ratio_20 numeric")
         cur.execute(f"ALTER TABLE {schema}.factor_performance ADD COLUMN IF NOT EXISTS quantile_returns jsonb NOT NULL DEFAULT '{{}}'::jsonb")
+        cur.execute(f"ALTER TABLE {schema}.model_weight_history ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT ''")
+        cur.execute(f"ALTER TABLE {schema}.model_weight_history ADD COLUMN IF NOT EXISTS horizon_days integer NOT NULL DEFAULT 5")
+        cur.execute(
+            f"""
+            DELETE FROM {schema}.model_weight_history a
+            USING {schema}.model_weight_history b
+            WHERE a.ctid < b.ctid
+              AND a.model_name=b.model_name
+              AND a.as_of_date=b.as_of_date
+              AND a.factor_name=b.factor_name
+              AND a.method=b.method
+              AND a.horizon_days=b.horizon_days
+              AND a.train_start IS NOT DISTINCT FROM b.train_start
+              AND a.train_end IS NOT DISTINCT FROM b.train_end
+            """
+        )
+        cur.execute(f"ALTER TABLE {schema}.model_weight_history DROP CONSTRAINT IF EXISTS model_weight_history_pkey")
+        cur.execute(
+            f"""
+            ALTER TABLE {schema}.model_weight_history
+            ADD PRIMARY KEY (model_name, as_of_date, factor_name, method, horizon_days, train_start, train_end)
+            """
+        )
+        cur.execute(f"ALTER TABLE {schema}.strategy_backtest_result ADD COLUMN IF NOT EXISTS profit_loss_ratio numeric")
+        cur.execute(f"ALTER TABLE {schema}.strategy_backtest_result ADD COLUMN IF NOT EXISTS buyable_ratio numeric")
         for column in [
             "ma5 numeric",
             "ma10 numeric",
@@ -712,10 +881,16 @@ def init_schema(settings: Settings) -> None:
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_factor_daily_factor_date ON {schema}.factor_daily(factor_name, trade_date)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_factor_daily_date_factor ON {schema}.factor_daily(trade_date, factor_name)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_factor_perf_factor ON {schema}.factor_performance(factor_name, horizon_days, market_regime)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_event_study_event ON {schema}.factor_event_study(event_name, horizon_days, market_regime)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_factor_corr_abs ON {schema}.factor_correlation(start_date, end_date, correlation)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_weight_model_date ON {schema}.model_weight_history(model_name, as_of_date)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_backtest_result_date ON {schema}.strategy_backtest_result(start_date, end_date)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_backtest_trades_date ON {schema}.strategy_backtest_trades(model_name, trade_date)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_shadow_candidates_date ON {schema}.factor_shadow_candidates(trade_date, model_name, top_n, hold_days)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_shadow_tracking_signal ON {schema}.factor_shadow_tracking(signal_date, model_name, horizon_days)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_trend_indicator_perf ON {schema}.trend_pure_indicator_performance(end_date, horizon_days, sample_split, avg_excess_return)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_trend_combo_perf ON {schema}.trend_pure_combo_performance(end_date, hold_days, top_n, sample_split, excess_return)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{schema}_factor_coverage_date ON {schema}.factor_data_coverage(as_of_date, table_name)")
         conn.commit()
 
 
