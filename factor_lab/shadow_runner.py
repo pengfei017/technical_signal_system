@@ -388,6 +388,61 @@ def _load_recent_candidates(
     return data
 
 
+def _load_current_prices(settings: Settings, start_date: str, end_date: str, ts_codes: list[str]) -> pd.DataFrame:
+    codes = sorted({str(code) for code in ts_codes if code})
+    if not codes:
+        return pd.DataFrame()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT DISTINCT ON (ts_code)
+                   ts_code,
+                   trade_date AS current_trade_date,
+                   adj_close AS current_price
+            FROM {qname(settings, 'daily_bars')}
+            WHERE trade_date BETWEEN %s AND %s
+              AND ts_code = ANY(%s)
+              AND adj_close IS NOT NULL
+            ORDER BY ts_code, trade_date DESC
+            """,
+            (normalize_date(start_date), normalize_date(end_date), codes),
+        )
+        rows = cur.fetchall()
+    data = pd.DataFrame(rows)
+    if data.empty:
+        return data
+    data["current_trade_date"] = pd.to_datetime(data["current_trade_date"]).dt.date
+    data["current_price"] = pd.to_numeric(data["current_price"], errors="coerce")
+    return data
+
+
+def _open_date_index(settings: Settings, start_date: str, end_date: str) -> dict[Any, int]:
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT cal_date
+            FROM {qname(settings, 'trade_calendar')}
+            WHERE is_open=true AND cal_date BETWEEN %s AND %s
+            ORDER BY cal_date
+            """,
+            (normalize_date(start_date), normalize_date(end_date)),
+        )
+        rows = cur.fetchall()
+    return {row["cal_date"]: idx for idx, row in enumerate(rows)}
+
+
+def _elapsed_open_days(open_index: dict[Any, int], entry_date: Any, current_date: Any) -> int | None:
+    if pd.isna(entry_date) or pd.isna(current_date):
+        return None
+    entry_key = pd.to_datetime(entry_date).date()
+    current_key = pd.to_datetime(current_date).date()
+    if entry_key not in open_index or current_key not in open_index:
+        return None
+    if open_index[current_key] < open_index[entry_key]:
+        return None
+    return int(open_index[current_key] - open_index[entry_key] + 1)
+
+
 def _horizons_for_model(model_name: str) -> tuple[int, ...]:
     if model_name == TREND_MODEL_NAME:
         return TREND_TRACKING_HORIZONS
@@ -408,6 +463,8 @@ def _update_tracking(
     if candidates.empty:
         return {"tracking_start_date": start_date, "tracking_rows": 0}
 
+    current_prices = _load_current_prices(settings, start_date, end_date, candidates["ts_code"].astype(str).tolist())
+    open_index = _open_date_index(settings, start_date, end_date)
     rows: list[dict[str, Any]] = []
     for horizon in TRACKING_HORIZONS:
         horizon_candidates = candidates[
@@ -430,8 +487,35 @@ def _update_tracking(
             ]
         ].copy()
         merged = horizon_candidates.merge(returns, on=["trade_date", "ts_code"], how="left")
+        if not current_prices.empty:
+            merged = merged.merge(current_prices, on="ts_code", how="left")
+        else:
+            merged["current_trade_date"] = None
+            merged["current_price"] = None
         for row in merged.to_dict("records"):
             is_complete = pd.notna(row.get("future_return"))
+            entry_date = row.get("entry_date") if pd.notna(row.get("entry_date")) else None
+            entry_price = _clean_float(row.get("entry_price"))
+            exit_date = row.get("exit_date") if pd.notna(row.get("exit_date")) else None
+            exit_price = _clean_float(row.get("exit_price"))
+            current_date = None
+            current_price = None
+            current_return = None
+            elapsed_days = None
+            if is_complete:
+                current_date = exit_date
+                current_price = exit_price
+                current_return = _clean_float(row.get("future_return"))
+                elapsed_days = int(horizon)
+            elif entry_date is not None and entry_price is not None and pd.notna(row.get("current_trade_date")) and pd.notna(row.get("current_price")):
+                latest_date = pd.to_datetime(row.get("current_trade_date")).date()
+                entry_date_value = pd.to_datetime(entry_date).date()
+                if latest_date >= entry_date_value:
+                    current_date = latest_date
+                    current_price = _clean_float(row.get("current_price"))
+                    if current_price is not None and entry_price:
+                        current_return = _clean_float(float(current_price) / float(entry_price) - 1.0)
+                    elapsed_days = _elapsed_open_days(open_index, entry_date, latest_date)
             rows.append(
                 {
                     "signal_date": row.get("trade_date"),
@@ -441,11 +525,15 @@ def _update_tracking(
                     "ts_code": row.get("ts_code"),
                     "horizon_days": horizon,
                     "comparison_type": row.get("comparison_type"),
-                    "entry_date": row.get("entry_date") if pd.notna(row.get("entry_date")) else None,
-                    "entry_price": _clean_float(row.get("entry_price")),
-                    "exit_date": row.get("exit_date") if pd.notna(row.get("exit_date")) else None,
-                    "exit_price": _clean_float(row.get("exit_price")),
+                    "entry_date": entry_date,
+                    "entry_price": entry_price,
+                    "exit_date": exit_date,
+                    "exit_price": exit_price,
                     "return_pct": _clean_float(row.get("future_return")),
+                    "current_trade_date": current_date,
+                    "current_price": current_price,
+                    "current_return_pct": current_return,
+                    "elapsed_days": elapsed_days,
                     "is_complete": bool(is_complete),
                 }
             )
@@ -465,6 +553,10 @@ def _update_tracking(
         "exit_date",
         "exit_price",
         "return_pct",
+        "current_trade_date",
+        "current_price",
+        "current_return_pct",
+        "elapsed_days",
         "is_complete",
     ]
     with connect() as conn:
@@ -520,14 +612,28 @@ def write_shadow_report(
     compact = date_value.replace("-", "")
     active_model_names = list(model_names or [])
     model_filter = "AND model_name = ANY(%s)" if active_model_names else ""
+    candidate_model_filter = "AND c.model_name = ANY(%s)" if active_model_names else ""
+    active_detail_model_filter = "AND t.model_name = ANY(%s)" if active_model_names else ""
     candidates = _query_df(
         settings,
         f"""
-        SELECT *
-        FROM {qname(settings, 'factor_shadow_candidates')}
-        WHERE trade_date=%s
-        {model_filter}
-        ORDER BY model_name, top_n, hold_days, comparison_type, factor_rank NULLS LAST, production_rank NULLS LAST
+        SELECT c.*,
+               t.current_trade_date,
+               t.current_return_pct,
+               t.elapsed_days,
+               t.return_pct AS complete_return_pct,
+               t.is_complete AS tracking_complete
+        FROM {qname(settings, 'factor_shadow_candidates')} c
+        LEFT JOIN {qname(settings, 'factor_shadow_tracking')} t
+          ON t.signal_date=c.trade_date
+         AND t.model_name=c.model_name
+         AND t.top_n=c.top_n
+         AND t.hold_days=c.hold_days
+         AND t.ts_code=c.ts_code
+         AND t.horizon_days=c.hold_days
+        WHERE c.trade_date=%s
+        {candidate_model_filter}
+        ORDER BY c.model_name, c.top_n, c.hold_days, c.comparison_type, c.factor_rank NULLS LAST, c.production_rank NULLS LAST
         """,
         tuple([date_value] + ([active_model_names] if active_model_names else [])),
     )
@@ -537,12 +643,52 @@ def write_shadow_report(
         SELECT model_name, top_n, hold_days, comparison_type, horizon_days,
                count(*) FILTER (WHERE is_complete) AS complete_count,
                avg(return_pct) FILTER (WHERE is_complete) AS avg_return,
-               avg((return_pct > 0)::int) FILTER (WHERE is_complete) AS win_rate
+               avg((return_pct > 0)::int) FILTER (WHERE is_complete) AS win_rate,
+               count(*) FILTER (WHERE NOT is_complete AND current_return_pct IS NOT NULL) AS active_count,
+               max(current_trade_date) FILTER (WHERE NOT is_complete AND current_return_pct IS NOT NULL) AS current_trade_date,
+               avg(current_return_pct) FILTER (WHERE NOT is_complete AND current_return_pct IS NOT NULL) AS avg_current_return,
+               avg((current_return_pct > 0)::int) FILTER (WHERE NOT is_complete AND current_return_pct IS NOT NULL) AS current_win_rate
         FROM {qname(settings, 'factor_shadow_tracking')}
         WHERE signal_date BETWEEN %s AND %s
         {model_filter}
         GROUP BY model_name, top_n, hold_days, comparison_type, horizon_days
         ORDER BY model_name, top_n, hold_days, comparison_type, horizon_days
+        """,
+        tuple([normalize_date(tracking_start_date), date_value] + ([active_model_names] if active_model_names else [])),
+    )
+    active_details = _query_df(
+        settings,
+        f"""
+        SELECT t.signal_date,
+               t.model_name,
+               t.top_n,
+               t.hold_days,
+               t.horizon_days,
+               t.comparison_type,
+               c.ts_code,
+               c.name,
+               c.industry,
+               c.factor_rank,
+               c.production_rank,
+               t.entry_date,
+               t.current_trade_date,
+               t.elapsed_days,
+               t.current_return_pct
+        FROM {qname(settings, 'factor_shadow_tracking')} t
+        JOIN {qname(settings, 'factor_shadow_candidates')} c
+          ON c.trade_date=t.signal_date
+         AND c.model_name=t.model_name
+         AND c.top_n=t.top_n
+         AND c.hold_days=t.hold_days
+         AND c.ts_code=t.ts_code
+        WHERE t.signal_date BETWEEN %s AND %s
+          AND t.horizon_days=t.hold_days
+          AND t.is_complete=false
+          AND t.current_return_pct IS NOT NULL
+        {active_detail_model_filter}
+        ORDER BY t.signal_date DESC, t.model_name, t.top_n, t.hold_days,
+                 t.comparison_type, c.factor_rank NULLS LAST, c.production_rank NULLS LAST
+        LIMIT 600
         """,
         tuple([normalize_date(tracking_start_date), date_value] + ([active_model_names] if active_model_names else [])),
     )
@@ -566,6 +712,7 @@ def write_shadow_report(
         "",
         f"- 生产对比口径：`stock_signal_daily.total_signal_score` Top{production_top_n}",
         "- 交易口径：收盘后出信号，下一交易日复权开盘买入；trend_pure_v1 跟踪 3/5/10/20 日；回测/跟踪收益使用板块涨跌停、一字跌停顺延退出和成交额容量约束。",
+        "- `current_return` 为未到期样本按当前最新复权收盘价计算的浮动收益；`complete_return` 为走完对应持有窗口后的正式结算收益。",
         "- 当前默认影子模型：只跑纯技术趋势 `trend_pure_v1`；旧的 event_adjusted_v1、walk_forward_v1、short_strength_v1 保留为历史研究命令，不再进入每日默认影子名单。",
         f"- 已累计影子交易日：{shadow_days}",
         "",
@@ -592,26 +739,48 @@ def write_shadow_report(
                     lines.append("- 无")
                     continue
                 subset = subset.sort_values(["factor_rank", "production_rank"], na_position="last").head(30)
-                lines.append("| code | name | industry | factor_rank | prod_rank | factor_score | prod_score | reason |")
-                lines.append("|---|---|---|---:|---:|---:|---:|---|")
+                lines.append("| code | name | industry | factor_rank | prod_rank | factor_score | prod_score | asof | current_return | complete_return | reason |")
+                lines.append("|---|---|---|---:|---:|---:|---:|---|---:|---:|---|")
                 for row in subset.to_dict("records"):
+                    current_date = row.get("current_trade_date")
+                    current_date_text = "" if pd.isna(current_date) else str(current_date)
                     lines.append(
                         f"| {row.get('ts_code', '')} | {row.get('name', '') or ''} | {row.get('industry', '') or ''} | "
                         f"{'' if pd.isna(row.get('factor_rank')) else int(row.get('factor_rank'))} | "
                         f"{'' if pd.isna(row.get('production_rank')) else int(row.get('production_rank'))} | "
                         f"{_format_number(row.get('factor_score'))} | {_format_number(row.get('production_score'))} | "
+                        f"{current_date_text} | {_format_pct(row.get('current_return_pct'))} | {_format_pct(row.get('complete_return_pct'))} | "
                         f"{row.get('reason', '') or ''} |"
                     )
     lines.extend(["", "## 跟踪收益汇总", ""])
     if tracking.empty:
         lines.append("- 暂无可汇总的跟踪记录。")
     else:
-        lines.append("| model | top | hold | type | horizon | complete | avg_return | win_rate |")
-        lines.append("|---|---:|---:|---|---:|---:|---:|---:|")
+        lines.append("| model | top | hold | type | horizon | complete | avg_return | win_rate | active | asof | current_return | current_win |")
+        lines.append("|---|---:|---:|---|---:|---:|---:|---:|---:|---|---:|---:|")
         for row in tracking.to_dict("records"):
+            current_date = row.get("current_trade_date")
+            current_date_text = "" if pd.isna(current_date) else str(current_date)
             lines.append(
                 f"| {row.get('model_name')} | {row.get('top_n')} | {row.get('hold_days')} | {row.get('comparison_type')} | "
-                f"{row.get('horizon_days')} | {row.get('complete_count')} | {_format_pct(row.get('avg_return'))} | {_format_pct(row.get('win_rate'))} |"
+                f"{row.get('horizon_days')} | {row.get('complete_count')} | {_format_pct(row.get('avg_return'))} | {_format_pct(row.get('win_rate'))} | "
+                f"{row.get('active_count')} | {current_date_text} | {_format_pct(row.get('avg_current_return'))} | {_format_pct(row.get('current_win_rate'))} |"
+            )
+    lines.extend(["", "## 持仓中浮动收益明细", ""])
+    if active_details.empty:
+        lines.append("- 暂无已买入但未到期的影子样本。")
+    else:
+        lines.append("| signal | model | top | hold | type | code | name | factor_rank | prod_rank | entry | asof | days | current_return |")
+        lines.append("|---|---|---:|---:|---|---|---|---:|---:|---|---|---:|---:|")
+        for row in active_details.to_dict("records"):
+            lines.append(
+                f"| {row.get('signal_date')} | {row.get('model_name')} | {row.get('top_n')} | {row.get('hold_days')} | "
+                f"{row.get('comparison_type')} | {row.get('ts_code')} | {row.get('name') or ''} | "
+                f"{'' if pd.isna(row.get('factor_rank')) else int(row.get('factor_rank'))} | "
+                f"{'' if pd.isna(row.get('production_rank')) else int(row.get('production_rank'))} | "
+                f"{row.get('entry_date') or ''} | {row.get('current_trade_date') or ''} | "
+                f"{'' if pd.isna(row.get('elapsed_days')) else int(row.get('elapsed_days'))} | "
+                f"{_format_pct(row.get('current_return_pct'))} |"
             )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return str(path)

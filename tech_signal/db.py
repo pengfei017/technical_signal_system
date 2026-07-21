@@ -731,6 +731,10 @@ def init_schema(settings: Settings) -> None:
                 exit_date date,
                 exit_price numeric,
                 return_pct numeric,
+                current_trade_date date,
+                current_price numeric,
+                current_return_pct numeric,
+                elapsed_days integer,
                 is_complete boolean NOT NULL DEFAULT false,
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 PRIMARY KEY (signal_date, model_name, top_n, hold_days, ts_code, horizon_days)
@@ -822,6 +826,10 @@ def init_schema(settings: Settings) -> None:
         cur.execute(f"ALTER TABLE {schema}.factor_performance ADD COLUMN IF NOT EXISTS quantile_returns jsonb NOT NULL DEFAULT '{{}}'::jsonb")
         cur.execute(f"ALTER TABLE {schema}.model_weight_history ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT ''")
         cur.execute(f"ALTER TABLE {schema}.model_weight_history ADD COLUMN IF NOT EXISTS horizon_days integer NOT NULL DEFAULT 5")
+        cur.execute(f"ALTER TABLE {schema}.factor_shadow_tracking ADD COLUMN IF NOT EXISTS current_trade_date date")
+        cur.execute(f"ALTER TABLE {schema}.factor_shadow_tracking ADD COLUMN IF NOT EXISTS current_price numeric")
+        cur.execute(f"ALTER TABLE {schema}.factor_shadow_tracking ADD COLUMN IF NOT EXISTS current_return_pct numeric")
+        cur.execute(f"ALTER TABLE {schema}.factor_shadow_tracking ADD COLUMN IF NOT EXISTS elapsed_days integer")
         cur.execute(
             f"""
             DELETE FROM {schema}.model_weight_history a
